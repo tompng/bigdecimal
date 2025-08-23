@@ -34,7 +34,8 @@
 
 #if SIZEOF_DECDIG == 4
 #define USE_NTT_MULTIPLICATION 1
-#include "ntt.h"
+#include "ntt64bit.h"
+#include "ntt32bit.h"
 #define NTT_MULTIPLICATION_THRESHOLD 100
 #define NEWTON_RAPHSON_DIVISION_THRESHOLD 900
 #endif
@@ -3281,12 +3282,17 @@ BigDecimal_vpmult(VALUE self, VALUE v) {
 
 #if SIZEOF_DECDIG == 4
 VALUE
-BigDecimal_nttmult(VALUE self, VALUE v) {
-    BDVALUE a,b,c;
+BigDecimal_nttmult(VALUE self, VALUE v, int bits) {
+    BDVALUE a, b, c;
     a = GetBDValueMust(self);
     b = GetBDValueMust(v);
     c = NewZeroWrap(1, VPMULT_RESULT_PREC(a.real, b.real) * BASE_FIG);
-    ntt_multiply(a.real->Prec, b.real->Prec, a.real->frac, b.real->frac, c.real->frac);
+    if (bits == 32) {
+        ntt_multiply32((uint32_t)a.real->Prec, (uint32_t)b.real->Prec, a.real->frac, b.real->frac, c.real->frac);
+    }
+    else {
+        ntt_multiply64((uint64_t)a.real->Prec, (uint64_t)b.real->Prec, a.real->frac, b.real->frac, c.real->frac);
+    }
     VpSetSign(c.real, a.real->sign * b.real->sign);
     c.real->exponent = a.real->exponent + b.real->exponent;
     c.real->Prec = a.real->Prec + b.real->Prec;
@@ -3294,6 +3300,15 @@ BigDecimal_nttmult(VALUE self, VALUE v) {
     RB_GC_GUARD(a.bigdecimal);
     RB_GC_GUARD(b.bigdecimal);
     return c.bigdecimal;
+}
+VALUE
+BigDecimal_nttmult32(VALUE self, VALUE v) {
+    return BigDecimal_nttmult(self, v, 32);
+}
+
+VALUE
+BigDecimal_nttmult64(VALUE self, VALUE v) {
+    return BigDecimal_nttmult(self, v, 64);
 }
 #endif
 
@@ -3672,7 +3687,8 @@ Init_bigdecimal(void)
     rb_define_method(rb_cBigDecimal, "newton_raphson_inverse", BigDecimal_newton_raphson_inverse, 1);
     rb_define_method(rb_cBigDecimal, "vpmult", BigDecimal_vpmult, 1);
 #ifdef USE_NTT_MULTIPLICATION
-    rb_define_method(rb_cBigDecimal, "nttmult", BigDecimal_nttmult, 1);
+    rb_define_method(rb_cBigDecimal, "nttmult32", BigDecimal_nttmult32, 1);
+    rb_define_method(rb_cBigDecimal, "nttmult64", BigDecimal_nttmult64, 1);
 #endif
 #endif /* BIGDECIMAL_USE_VP_TEST_METHODS */
 
@@ -4959,7 +4975,7 @@ VpMult(Real *c, Real *a, Real *b)
 
 #ifdef USE_NTT_MULTIPLICATION
     if (b->Prec >= NTT_MULTIPLICATION_THRESHOLD) {
-        ntt_multiply((uint32_t)a->Prec, (uint32_t)b->Prec, a->frac, b->frac, c->frac);
+        ntt_multiply(a->Prec, b->Prec, a->frac, b->frac, c->frac);
         c->Prec = a->Prec + b->Prec;
         goto Cleanup;
     }

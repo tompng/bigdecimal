@@ -30,7 +30,8 @@ class TestVpOperation < Test::Unit::TestCase
     [*1..32].repeated_permutation(2) do |a, b|
       x = BigDecimal(10 ** (BASE_FIG * a) / 7)
       y = BigDecimal(10 ** (BASE_FIG * b) / 13)
-      assert_equal(x.to_i * y.to_i, x.nttmult(y))
+      assert_equal(x.to_i * y.to_i, x.nttmult32(y))
+      assert_equal(x.to_i * y.to_i, x.nttmult64(y))
     end
   end
 
@@ -60,7 +61,8 @@ class TestVpOperation < Test::Unit::TestCase
       assert_equal(xy, x.vpmult(y))
       assert_equal(3, BigDecimal.limit)
       if ntt_mult_available?
-        assert_equal(xy, x.nttmult(y))
+        assert_equal(xy, x.nttmult32(y))
+        assert_equal(xy, x.nttmult64(y))
         assert_equal(3, BigDecimal.limit)
       end
 
