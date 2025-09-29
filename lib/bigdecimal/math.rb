@@ -876,4 +876,245 @@ module BigMath
     prec = BigDecimal::Internal.coerce_validate_prec(prec, :E)
     exp(1, prec)
   end
+
+  private def _relative_precision_pi_sinpix(x, prec)
+    x = x % 2
+    pi_prec = prec + BigDecimal.double_fig
+    pi = PI(pi_prec)
+    sin = sin(x.mult(pi, pi_prec), pi_prec)
+    while true
+      break if prec - sin.exponent <= pi_prec
+      if sin.exponent == 0 || pi_prec < -sin.exponent
+        pi_prec = pi_prec * 3 / 2
+      else
+        pi_prec = prec - sin.exponent + BigDecimal.double_fig
+      end
+      pi = PI(pi_prec)
+      sin = sin(x.mult(pi, pi_prec), pi_prec)
+    end
+    [pi, sin]
+  end
+
+  def gamma_polynomial_interpolation(x, prec)
+    x -= 1
+    a = prec
+    # Interpolate f(x)=gamma(x-1)*(3/x)**x at x=[b, b+1, b+2, ... b+a-1]
+    # Polynomial interpolation of gamma(x) is not stable, gamma(x)*(e/x)**x/sqrt(x) is Spouge's approximation
+    # Omit sqrt(x) and use 3 instead of e to introduce optimization
+
+    # calculate at x+offset where error is minimized
+    offset = [2 * a + a / 2 - x.to_i, 0].max
+    x += offset
+    b = x.to_i - a / 2
+
+    scale = x.div(3, prec).power(x, prec)
+    (1..b).each {|i| scale = scale.mult(3 * i, prec) }
+    (-a..-1).each {|i| scale = scale.div(i, prec) }
+    (0..a).each {|i| scale = scale.mult(x - a - b + i, prec) }
+
+    sum = BigDecimal(0)
+    f = BigDecimal(1)
+    (0..a).each do |i|
+      if i != 0
+        f = f.mult((b + i) * (i - a - 1) * 3, prec).div(i, prec)
+      end
+      sum = sum.add(f.div(BigDecimal(b + i).power(b + i, prec).mult(x - i - b, prec), prec), prec)
+    end
+
+    offset.times {|i| sum = sum.div(x - i, prec) }
+    sum.mult(scale, prec)
+  end
+
+  def gamma_polynomial_interpolation2(x, prec)
+    x = BigDecimal(x)
+    x -= 1
+    a = prec * 2
+
+    # Interpolate f(x)=gamma(x-1)/b**x at x=[b, b+1, b+2, ... b+a-1]
+    # Polynomial interpolation of gamma(x) is not stable, gamma(x)*(e/x)**x/sqrt(x) is Spouge's approximation
+    # Omit sqrt(x) and use 3 instead of e to introduce optimization
+
+    # calculate at x+offset where error is minimized
+    offset = [2 * a + a / 2 - x.to_i, 0].max
+    x += offset
+    b = x.to_i - a / 2
+
+    p [a, b]
+
+
+    low_prec = 16
+    scale = BigDecimal(b).power(x - b, low_prec)
+    (1..b).each {|i| scale = scale.mult(i, low_prec) }
+    (-a..-1).each {|i| scale = scale.div(i, low_prec) }
+    (0..a).each {|i| scale = scale.mult(x - a - b + i, low_prec) }
+
+    logf = 0
+    logmax = (0..a).map do |i|
+      logf += Math.log(b + i) + Math.log(a + 1 - i) - Math.log(b) - Math.log(i) if i != 0
+      logf - BigDecimal::Internal.float_log((x - i - b).abs)
+    end.max
+    extra = ((logmax - Math.lgamma(x + 1)[0] + BigDecimal::Internal.float_log(scale.abs)) / Math.log(10)).ceil
+
+    # Calculate the sum below using binary splitting to reduce calculation cost when x has low precision
+    # sum = BigDecimal(0)
+    # f = BigDecimal(1)
+    # (0..a).each do |i|
+    #   if i != 0
+    #     f = f.mult((b + i) * (i - a - 1), prec + extra).div(b * i, prec + extra)
+    #   end
+    #   sum = sum.add(f.div(x - i - b, prec + extra), prec + extra)
+    # end
+    extra_prec = prec + extra
+    fractions = (1..a).map do |i|
+      denominator = BigDecimal((b * i) * (x - i - b))
+      bi = BigDecimal(b * i)
+      [denominator, BigDecimal(x - i - b + 1).mult((b + i) * (i - a - 1), extra_prec), denominator]
+    end
+    while fractions.size > 1
+      fractions = fractions.each_slice(2).map do |a, b|
+        b ||= [BigDecimal(1), BigDecimal(0), BigDecimal(1)]
+        # a[0]/a[2]+a[1]/a[2] * (b[0]/b[2]+b[1]/b[2] * rest)
+        # (a[0]*b[2]+a[1]*b[0])/(a[2]*b[2]) + (a[1]*b[1])/(a[2]*b[2]) * rest
+        [a[0].mult(b[2], extra_prec).add(a[1].mult(b[0], extra_prec), extra_prec), a[1].mult(b[1], extra_prec), a[2].mult(b[2], extra_prec)]
+      end
+    end
+    sum = fractions[0][0].add(fractions[0][1], extra_prec).div(fractions[0][2], extra_prec).div(x - b, extra_prec)
+    scale = BigDecimal(b).power(x - b, prec)
+    scale = -scale if a.odd?
+    numerators = a < b ? [*a+1..b] : [1]
+    denominators = a < b ? [1] : [*b+1..a]
+    xnumerators = [*b..a+b]
+    xdenominators = [*0...offset]
+    xcommon = xnumerators & xdenominators
+    numerators = numerators.map {|n| BigDecimal(n) } + (xnumerators - xcommon).map {|n| x - n }
+    denominators = denominators.map {|n| BigDecimal(n) } + (xdenominators - xcommon).map {|n| x - n }
+    numerators = numerators.each_slice(2).map { |a, b = 1| a.mult(b, prec) } until numerators.size == 1
+    denominators = denominators.each_slice(2).map { |a, b = 1| a.mult(b, prec) } until denominators.size == 1
+    sum.mult(scale, prec).mult(numerators[0], prec).div(denominators[0], prec)
+  end
+end
+
+# TODO: delete this before merging
+# Methods defined in other open pull requests
+module BigMath
+  module ::BigDecimal::Internal
+
+    # Calculates Math.log(x.to_f) considering large or small exponent
+    def self.float_log(x) # :nodoc:
+      Math.log(x._decimal_shift(-x.exponent).to_f) + x.exponent * Math.log(10)
+    end
+
+    def self.taylor_sum_binary_splitting(x, ds, prec) # :nodoc:
+      fs = ds.map {|d| [0, BigDecimal(d)] }
+      # fs = [[a0, a1], [b0, b1], [c0, c1], ...]
+      # f(x) = a0/a1+(x/a1)*(1+b0/b1+(x/b1)*(1+c0/c1+(x/c1)*(1+d0/d1+(x/d1)*(1+...))))
+      while fs.size > 1
+        # Merge two adjacent fractions
+        # from: (1 + a0/a1 + x/a1 * (1 + b0/b1 + x/b1 * rest))
+        # to:   (1 + (a0*b1+x*(b0+b1))/(a1*b1) + (x*x)/(a1*b1) * rest)
+        xn = xn ? xn.mult(xn, prec) : x
+        fs = fs.each_slice(2).map do |(a, b)|
+          b ||= [0, BigDecimal(1)._decimal_shift([xn.exponent, 0].max + 2)]
+          [
+            (a[0] * b[1]).add(xn * (b[0] + b[1]), prec),
+            a[1].mult(b[1], prec)
+          ]
+        end
+      end
+      BigDecimal(fs[0][0]).div(fs[0][1], prec)
+    end
+
+    # Calculates x * (x + 1) * (x + 2) * ... * (x+n-1)
+    def self.mult_x_n(x, n, prec)
+      if x < 0
+        # Avoid cancellation error
+        if x + n - 1 > 0
+          m = -x.floor
+          return mult_x_n(x, m, prec).mult(mult_x_n(x + m, n - m, prec), prec)
+        else
+          return mult_x_n(1 - n - x, n, prec) * (-1)**n
+        end
+      end
+
+      x = BigDecimal(x)
+      w = Integer.sqrt(n)
+      h = (n + w - 1) / w
+      xpows = [BigDecimal(1)]
+      w.times { xpows << xpows.last.mult(x, prec) }
+      ans = BigDecimal(1)
+      h.times do |hi|
+        cs = [1]
+        (w * hi...[w * (hi + 1), n].min).each do |k|
+          cs = [0, *cs].zip([*cs, 0]).map { _1 + k * _2 }
+        end
+        sum = BigDecimal(0)
+        cs.each_with_index do |c, i|
+          sum = sum.add(c * xpows[i], prec)
+        end
+        ans = ans.mult(sum, prec)
+      end
+      ans
+    end
+  end
+
+  def self.PI(prec)
+    prec = BigDecimal::Internal.coerce_validate_prec(prec, :PI)
+    n = prec + BigDecimal.double_fig
+    a = BigDecimal(1)
+    b = BigDecimal(0.5, 0).sqrt(n)
+    s = BigDecimal(0.25, 0)
+    t = 1
+    while a != b && (a - b).exponent > 1 - n
+      c = (a - b).div(2, n)
+      a, b = (a + b).div(2, n), (a * b).sqrt(n)
+      s = s.sub(c * c * t, n)
+      t *= 2
+    end
+    (a * b).div(s, prec)
+  end
+
+  private_class_method def self._exp_binary_splitting(x, prec) # :nodoc:
+    return BigDecimal(1) if x.zero?
+    # Find k that satisfies x**k / k! < 10**(-prec)
+    log10 = Math.log(10)
+    logx = BigDecimal::Internal.float_log(x.abs)
+    step = (1..).bsearch { |k| Math.lgamma(k + 1)[0] - k * logx > prec * log10 }
+    # exp(x)-1 = x*(1+x/2*(1+x/3*(1+x/4*(1+x/5*(1+...)))))
+    1 + BigDecimal::Internal.taylor_sum_binary_splitting(x, [*1..step], prec)
+  end
+
+  def self.exp(x, prec)
+    prec = BigDecimal::Internal.coerce_validate_prec(prec, :exp)
+    x = BigDecimal::Internal.coerce_to_bigdecimal(x, prec, :exp)
+    return BigDecimal::Internal.nan_computation_result if x.nan?
+    return x.positive? ? BigDecimal::Internal.infinity_computation_result : BigDecimal(0) if x.infinite?
+    return BigDecimal(1) if x.zero?
+    # exp(x * 10**cnt) = exp(x)**(10**cnt)
+    cnt = x < -1 || x > 1 ? x.exponent : 0
+    prec2 = prec + BigDecimal.double_fig + cnt
+    x = x._decimal_shift(-cnt)
+    # Decimal form of bit-burst algorithm
+    # Calculate exp(x.xxxxxxxxxxxxxxxx) as
+    # exp(x.xx) * exp(0.00xx) * exp(0.0000xxxx) * exp(0.00000000xxxxxxxx)
+    x = x.mult(1, prec2)
+    n = 2
+    y = BigDecimal(1)
+    BigDecimal.save_limit do
+      BigDecimal.limit(0)
+      while x != 0 do
+        partial_x = x.truncate(n)
+        x -= partial_x
+        y = y.mult(_exp_binary_splitting(partial_x, prec2), prec2)
+        n *= 2
+      end
+    end
+    # calculate exp(x * 10**cnt) from exp(x)
+    # exp(x * 10**k) = exp(x * 10**(k - 1)) ** 10
+    cnt.times do
+      y2 = y.mult(y, prec2)
+      y5 = y2.mult(y2, prec2).mult(y, prec2)
+      y = y5.mult(y5, prec2)
+    end
+    y.mult(1, prec)
+  end
 end
