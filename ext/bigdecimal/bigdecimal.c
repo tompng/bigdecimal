@@ -276,8 +276,8 @@ MAYBE_UNUSED(static inline BDVALUE rbd_allocate_struct_zero_wrap(int sign, size_
 static BDVALUE
 rbd_allocate_struct_zero_wrap(int sign, size_t const digits)
 {
-    NULL_WRAPPED_VALUE null_wrapped = BigDecimal_alloc_empty_struct(rb_cBigDecimal);
     Real *real = rbd_allocate_struct_zero(sign, digits);
+    NULL_WRAPPED_VALUE null_wrapped = BigDecimal_alloc_empty_struct(rb_cBigDecimal);
     return (BDVALUE) { BigDecimal_wrap_struct(null_wrapped, real), real };
 }
 
@@ -1053,9 +1053,10 @@ check_int_precision(VALUE v)
 static NULLABLE_BDVALUE
 CreateFromString(const char *str, VALUE klass, bool strict_p, bool raise_exception)
 {
-    NULL_WRAPPED_VALUE null_wrapped = BigDecimal_alloc_empty_struct(klass);
     Real *pv = VpAlloc(str, strict_p, raise_exception);
     if (!pv) return (NULLABLE_BDVALUE) { Qnil, NULL };
+
+    NULL_WRAPPED_VALUE null_wrapped = BigDecimal_alloc_empty_struct(klass);
     return (NULLABLE_BDVALUE) { BigDecimal_wrap_struct(null_wrapped, pv), pv };
 }
 
@@ -2602,7 +2603,6 @@ check_exception(VALUE bd)
 static VALUE
 rb_uint64_convert_to_BigDecimal(uint64_t uval)
 {
-    NULL_WRAPPED_VALUE null_wrapped = BigDecimal_alloc_empty_struct(rb_cBigDecimal);
     Real *vp;
     if (uval == 0) {
         vp = rbd_allocate_struct(1);
@@ -2643,7 +2643,7 @@ rb_uint64_convert_to_BigDecimal(uint64_t uval)
         VpSetSign(vp, 1);
         MEMCPY(vp->frac, buf + BIGDECIMAL_INT64_MAX_LENGTH - len, DECDIG, len);
     }
-
+    NULL_WRAPPED_VALUE null_wrapped = BigDecimal_alloc_empty_struct(rb_cBigDecimal);
     return BigDecimal_wrap_struct(null_wrapped, vp);
 }
 
@@ -2928,12 +2928,12 @@ rb_convert_to_BigDecimal(VALUE val, size_t digs, int raise_exception)
         if (digs == SIZE_MAX)
             return check_exception(val);
 
-        NULL_WRAPPED_VALUE null_wrapped = BigDecimal_alloc_empty_struct(rb_cBigDecimal);
         Real *vp;
         TypedData_Get_Struct(val, Real, &BigDecimal_data_type, vp);
         vp = VpCopy(NULL, vp);
         RB_GC_GUARD(val);
 
+        NULL_WRAPPED_VALUE null_wrapped = BigDecimal_alloc_empty_struct(rb_cBigDecimal);
         VALUE copy = BigDecimal_wrap_struct(null_wrapped, vp);
         /* TODO: rounding */
         return check_exception(copy);
