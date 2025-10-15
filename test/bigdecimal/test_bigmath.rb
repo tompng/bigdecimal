@@ -142,6 +142,7 @@ class TestBigMath < Test::Unit::TestCase
     assert_converge_in_precision {|n| sqrt(BigDecimal("2"), n) }
     assert_converge_in_precision {|n| sqrt(BigDecimal("2e-50"), n) }
     assert_converge_in_precision {|n| sqrt(BigDecimal("2e50"), n) }
+    assert_equal(sqrt(BigDecimal(3/7r, 120), 100), sqrt(3/7r, 100))
   end
 
   def test_cbrt
@@ -163,6 +164,7 @@ class TestBigMath < Test::Unit::TestCase
     assert_converge_in_precision {|n| cbrt(BigDecimal("2e-50"), n) }
     assert_converge_in_precision {|n| cbrt(SQRT2, n) }
     assert_converge_in_precision {|n| cbrt(BigDecimal("2e50"), n) }
+    assert_equal(cbrt(BigDecimal(3/7r, 120), 100), cbrt(3/7r, 100))
   end
 
   def test_hypot
@@ -175,6 +177,7 @@ class TestBigMath < Test::Unit::TestCase
     assert_converge_in_precision {|n| hypot(BigDecimal("1.23"), BigDecimal("4.56"), n) }
     assert_converge_in_precision {|n| hypot(SQRT2 - 1, SQRT3 - 1, n) }
     assert_converge_in_precision {|n| hypot(BigDecimal("2e30"), BigDecimal("1e30"), n) }
+    assert_equal(hypot(BigDecimal(1/3r, 120), BigDecimal(3/7r, 120), 100), hypot(1/3r, 3/7r, 100))
   end
 
   def test_sin
@@ -239,6 +242,17 @@ class TestBigMath < Test::Unit::TestCase
     assert_converge_in_precision {|n| tan(BigMath::PI(50), n) }
   end
 
+  def test_sin_cos_tan_rational
+    pi = PI(100)
+    denominator = 7 * 10**40
+    [pi / 2, pi, pi * 3 / 2, 2 * pi, pi * 10**40].each do |x|
+      rational = (x * denominator).round.quo(denominator)
+      assert_equal(sin(BigDecimal(rational, 200), 100), sin(rational, 100))
+      assert_equal(cos(BigDecimal(rational, 200), 100), cos(rational, 100))
+      assert_equal(tan(BigDecimal(rational, 200), 100), tan(rational, 100))
+    end
+  end
+
   def test_asin
     ["-1", "-0.9", "-0.1", "0", "0.1", "0.9", "1"].each do |x|
       assert_in_delta(Math.asin(x.to_f), asin(BigDecimal(x), N))
@@ -274,6 +288,14 @@ class TestBigMath < Test::Unit::TestCase
     assert_converge_in_precision {|n| acos(BigDecimal("1e-30"), n) }
   end
 
+  def test_asin_acos_rational
+    small_rational = 1/7r / 10**40
+    [-1 + small_rational, small_rational, 1 - small_rational].each do |rational|
+      assert_equal(asin(BigDecimal(rational, 200), 100), asin(rational, 100))
+      assert_equal(acos(BigDecimal(rational, 200), 100), acos(rational, 100))
+    end
+  end
+
   def test_atan
     assert_equal(0.0, atan(BigDecimal("0.0"), N))
     assert_in_delta(Math::PI/4, atan(BigDecimal("1.0"), N))
@@ -286,6 +308,7 @@ class TestBigMath < Test::Unit::TestCase
     assert_converge_in_precision {|n| atan(BigDecimal("1e-30"), n)}
     assert_converge_in_precision {|n| atan(BigDecimal("1e30"), n)}
     assert_equal(BigDecimal(0.78), BigMath.atan(0.996, 2))
+    assert_equal(atan(BigDecimal(3/7r, 120), 100), atan(3/7r, 100))
   end
 
   def test_atan2
@@ -306,6 +329,7 @@ class TestBigMath < Test::Unit::TestCase
       assert_in_delta(Math.atan2(y.to_f, x.to_f), atan2(BigDecimal(y), BigDecimal(x), N))
       assert_converge_in_precision {|n| atan2(BigDecimal(y), BigDecimal(x), n) }
     end
+    assert_equal(atan2(BigDecimal(1/3r, 120), BigDecimal(3/7r, 120), 100), atan2(1/3r, 3/7r, 100))
   end
 
   def test_hyperbolic
@@ -338,6 +362,14 @@ class TestBigMath < Test::Unit::TestCase
     end
   end
 
+  def test_hyperbolic_rational
+    [-3/7r, 1/7r / 10**40, 100000/3r].each do |rational|
+      assert_equal(sinh(BigDecimal(rational, 200), 100), sinh(rational, 100))
+      assert_equal(cosh(BigDecimal(rational, 200), 100), cosh(rational, 100))
+      assert_equal(tanh(BigDecimal(rational, 200), 100), tanh(rational, 100))
+    end
+  end
+
   def test_asinh
     [-3, 0.5, 10].each do |x|
       assert_in_delta(Math.asinh(x), asinh(BigDecimal(x.to_s), N))
@@ -354,6 +386,12 @@ class TestBigMath < Test::Unit::TestCase
     end
   end
 
+  def test_asinh_rational
+    [-1/3r, 3/7r].each do |rational|
+      assert_equal(asinh(BigDecimal(rational, 120), 100), asinh(rational, 100))
+    end
+  end
+
   def test_acosh
     [1.5, 2, 10].each do |x|
       assert_in_delta(Math.acosh(x), acosh(BigDecimal(x.to_s), N))
@@ -366,6 +404,12 @@ class TestBigMath < Test::Unit::TestCase
 
     ["1." + "0" * 30 + "1", "1.5", "2", "100"].each do |x|
       assert_converge_in_precision {|n| acosh(BigDecimal(x), n)}
+    end
+  end
+
+  def test_acosh_rational
+    [1 + 1/7r / 10**40, 7/3r].each do |rational|
+      assert_equal(acosh(BigDecimal(rational - 1, 120) + 1, 100), acosh(rational, 100))
     end
   end
 
@@ -385,6 +429,13 @@ class TestBigMath < Test::Unit::TestCase
     end
   end
 
+  def test_atanh_rational
+    small_ratinal = 1/7r / 10**40
+    [-1 + small_ratinal, small_ratinal, 1 - small_ratinal].each do |rational|
+      assert_equal(atanh(BigDecimal(rational, 200), 100), atanh(rational, 100))
+    end
+  end
+
   def test_exp
     [-100, -2, 0.5, 10, 100].each do |x|
       assert_in_epsilon(Math.exp(x), exp(BigDecimal(x, 0), N))
@@ -400,6 +451,11 @@ class TestBigMath < Test::Unit::TestCase
     assert_converge_in_precision {|n| exp(BigDecimal("-34"), n) }
     assert_converge_in_precision {|n| exp(BigDecimal("567"), n) }
     assert_converge_in_precision {|n| exp(SQRT2, n) }
+  end
+
+  def test_exp_rational
+    rational = 30000001/3r
+    assert_equal(BigMath.exp(BigDecimal(rational, 120), 100), BigMath.exp(rational, 100))
   end
 
   def test_log
@@ -426,6 +482,11 @@ class TestBigMath < Test::Unit::TestCase
     end
   end
 
+  def test_log_rational
+    rational = 3/7r / 10**100
+    assert_equal(log(BigDecimal(rational, 120) + 1, 100), log(rational + 1, 100))
+  end
+
   def test_log2
     assert_raise(Math::DomainError) { log2(BigDecimal("-0.01"), N) }
     assert_raise(Math::DomainError) { log2(MINF, N) }
@@ -444,6 +505,11 @@ class TestBigMath < Test::Unit::TestCase
         assert_equal(n, log2(BigDecimal(2**n), N))
       end
     end
+  end
+
+  def test_log2_rational
+    rational = 3/7r / 10**100
+    assert_equal(log2(BigDecimal(rational, 120) + 1, 100), log2(rational + 1, 100))
   end
 
   def test_log10
@@ -466,12 +532,22 @@ class TestBigMath < Test::Unit::TestCase
     end
   end
 
+  def test_log10_rational
+    rational = 3/7r / 10**100
+    assert_equal(log10(BigDecimal(rational, 120) + 1, 100), log10(rational + 1, 100))
+  end
+
   def test_log1p
     assert_raise(Math::DomainError) { log1p(MINF, N) }
     assert_raise(Math::DomainError) { log1p(BigDecimal("-1.01"), N) }
     assert_in_epsilon(Math.log(0.01), log1p(BigDecimal("-0.99"), N))
     assert_positive_infinite_calculation { log1p(PINF, N) }
     assert_in_exact_precision(log(1 + BigDecimal("1e-20"), 100), log1p(BigDecimal("1e-20"), 100), 100)
+  end
+
+  def test_log1p_rational
+    rational = 3/7r / 10**100
+    assert_equal(log1p(BigDecimal(rational, 120), 100), log1p(rational, 100))
   end
 
   def test_expm1
@@ -485,6 +561,12 @@ class TestBigMath < Test::Unit::TestCase
     assert_in_exact_precision(exp(BigDecimal("1.23e-10"), 120) - 1, expm1(BigDecimal("1.23e-10"), 100), 100)
     assert_in_exact_precision(exp(123, 120) - 1, expm1(BigDecimal("123"), 100), 100)
     assert_equal(exp(BigDecimal("1e+12"), N), expm1(BigDecimal("1e+12"), N))
+  end
+
+  def test_expm1_rational
+    [-3/2r, 3/7r / 10**100, 7/3r].each do |rational|
+      assert_equal(expm1(BigDecimal(rational, 120), 100), expm1(rational, 100))
+    end
   end
 
   def test_erf
@@ -508,6 +590,12 @@ class TestBigMath < Test::Unit::TestCase
     assert_converge_in_precision {|n| BigMath.erf(BigDecimal("1e-30"), n) }
     assert_converge_in_precision {|n| BigMath.erf(BigDecimal("0.3"), n) }
     assert_converge_in_precision {|n| BigMath.erf(SQRT2, n) }
+  end
+
+  def test_erf_rational
+    [3/7r, 30/7r, 100/7r].each do |rational|
+      assert_equal(erf(BigDecimal(rational, 120), 100), erf(rational, 100))
+    end
   end
 
   def test_erfc
@@ -543,6 +631,12 @@ class TestBigMath < Test::Unit::TestCase
     assert_converge_in_precision {|n| BigMath.erfc(BigDecimal(20.5), n) }
   end
 
+  def test_erfc_rational
+    [3/7r, 30/7r, 100/7r].each do |rational|
+      assert_equal(erfc(BigDecimal(rational, 120), 100), erfc(rational, 100))
+    end
+  end
+
   def test_gamma
     [-1.8, -0.7, 0.6, 1.5, 2.4].each do |x|
       assert_in_epsilon(Math.gamma(x), gamma(BigDecimal(x.to_s), N))
@@ -561,6 +655,12 @@ class TestBigMath < Test::Unit::TestCase
     assert_converge_in_precision {|n| gamma(BigDecimal("-1.9" + "9" * 30), n) }
     assert_converge_in_precision {|n| gamma(BigDecimal("1234.56789"), n) }
     assert_converge_in_precision {|n| gamma(BigDecimal("-987.654321"), n) }
+  end
+
+  def test_gamma_rational
+    [-7/3r, 2/3r, 3r, 10/3r].each do |rational|
+      assert_equal(gamma(BigDecimal(rational, 120), 100), gamma(rational, 100))
+    end
   end
 
   def test_lgamma
@@ -592,6 +692,29 @@ class TestBigMath < Test::Unit::TestCase
     # gamma close 1 or -1 cases
     assert_converge_in_precision {|n| lgamma(BigDecimal('-3.143580888349980058694358781820227899566'), n).first }
     assert_converge_in_precision {|n| lgamma(BigDecimal('-4.991544640560047722345260122806465721667'), n).first }
+  end
+
+  def test_lgamma_rational
+    # normal cases
+    [3/7r, 4r].each do |rational|
+      assert_equal(lgamma(BigDecimal(rational, 120), 100), lgamma(rational, 100))
+    end
+
+    # near poles and zeros
+    small_rational = 1/7r / 10**40
+    [-3 + small_rational, -2 + small_rational, -2 - small_rational, small_rational, 1 + small_rational, 2 + small_rational].each do |rational|
+      assert_equal(lgamma(BigDecimal(rational, 200), 100), lgamma(rational, 100))
+    end
+
+    # gamma close 1 or -1 non-trivial cases
+    [
+      BigDecimal('-3.143580888349980058694358781820227899566'),
+      BigDecimal('-4.991544640560047722345260122806465721667')
+    ].each do |x|
+      denominator = 7 * 10**80
+      rational = (x * denominator).round.quo(denominator)
+      assert_equal(lgamma(BigDecimal(rational, 200), 100), lgamma(rational, 100))
+    end
   end
 
   def test_frexp

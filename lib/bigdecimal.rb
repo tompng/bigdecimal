@@ -13,16 +13,16 @@ end
 class BigDecimal
   module Internal # :nodoc:
 
-    # Coerce x to BigDecimal with the specified precision.
-    # TODO: some methods (example: BigMath.exp) require more precision than specified to coerce.
-    def self.coerce_to_bigdecimal(x, prec, method_name) # :nodoc:
+    # Coerce x to BigDecimal. If x is Rational, convert to BigDecimal with rational_prec or return nil if rational_prec is nil.
+    def self.coerce_to_bigdecimal(x, rational_prec, method_name) # :nodoc:
       case x
       when BigDecimal
         return x
       when Integer, Float
         return BigDecimal(x, 0)
       when Rational
-        return BigDecimal(x, [prec, 2 * BigDecimal.double_fig].max)
+        return BigDecimal(x.numerator) if x.denominator == 1
+        return rational_prec && BigDecimal(x, [rational_prec, BigDecimal.double_fig].max + BigDecimal.double_fig)
       end
       raise ArgumentError, "#{x.inspect} can't be coerced into BigDecimal"
     end
@@ -97,7 +97,29 @@ class BigDecimal
   def power(y, prec = 0)
     prec = Internal.coerce_validate_prec(prec, :power, accept_zero: true)
     x = self
-    y = Internal.coerce_to_bigdecimal(y, prec.nonzero? || n_significant_digits, :power)
+
+    if Rational === y
+      if y.denominator == 1
+        y = BigDecimal(y.numerator)
+      elsif x.finite?
+        # x ** y = exp(y * log(x))
+        # y needs (y*log(x)).exponent extra precision
+        ylogx = BigMath.log(x, 1).mult(y, 1)
+        y_extra_digits = [ylogx.exponent, 0].max
+        result_prec = prec.nonzero? || [x.n_significant_digits, BigDecimal.double_fig].max + BigDecimal.double_fig
+        y = BigDecimal(y, result_prec + y_extra_digits + BigDecimal.double_fig)
+      else
+        y = BigDecimal(y, prec + BigDecimal.double_fig)
+      end
+    else
+      y = Internal.coerce_to_bigdecimal(y, nil, :power)
+    end
+
+    limit = BigDecimal.limit
+    result_prec ||= prec.nonzero? || [x.n_significant_digits, y.n_significant_digits, BigDecimal.double_fig].max + BigDecimal.double_fig
+    if prec.zero? && limit.nonzero?
+      result_prec = [result_prec, limit].min
+    end
 
     return Internal.nan_computation_result if x.nan? || y.nan?
     return BigDecimal(1) if y.zero?
@@ -144,7 +166,6 @@ class BigDecimal
       return BigDecimal(1)
     end
 
-    limit = BigDecimal.limit
     frac_part = y.frac
 
     if frac_part.zero? && prec.zero? && limit.zero?
@@ -256,7 +277,12 @@ module BigMath
     prec = BigDecimal::Internal.coerce_validate_prec(prec, :log)
     raise Math::DomainError, 'Complex argument for BigMath.log' if Complex === x
 
-    x = BigDecimal::Internal.coerce_to_bigdecimal(x, prec, :log)
+    if Rational === x
+      x = x < 1/2r ? BigDecimal(x, prec + BigDecimal.double_fig) : BigDecimal(x - 1, prec + BigDecimal.double_fig) + 1
+    else
+      x = BigDecimal::Internal.coerce_to_bigdecimal(x, nil, :log)
+    end
+
     return BigDecimal::Internal.nan_computation_result if x.nan?
     raise Math::DomainError, 'Negative argument for log' if x < 0
     return -BigDecimal::Internal.infinity_computation_result if x.zero?
@@ -331,7 +357,13 @@ module BigMath
   #
   def exp(x, prec)
     prec = BigDecimal::Internal.coerce_validate_prec(prec, :exp)
-    x = BigDecimal::Internal.coerce_to_bigdecimal(x, prec, :exp)
+
+    if Rational === x
+      x = BigDecimal(x, prec + BigDecimal.double_fig + [BigDecimal(x, 1).exponent, 0].max)
+    else
+      x = BigDecimal::Internal.coerce_to_bigdecimal(x, nil, :exp)
+    end
+
     return BigDecimal::Internal.nan_computation_result if x.nan?
     return x.positive? ? BigDecimal::Internal.infinity_computation_result : BigDecimal(0) if x.infinite?
     return BigDecimal(1) if x.zero?

@@ -2346,7 +2346,6 @@ class TestBigDecimal < Test::Unit::TestCase
     assert_in_epsilon(Math.exp(40), BigMath.exp(Rational(80,2), prec))
     assert_in_epsilon(Math.exp(-20), BigMath.exp(Rational(-40,2), prec))
     assert_in_epsilon(Math.exp(-40), BigMath.exp(Rational(-80,2), prec))
-    assert_in_epsilon(BigMath.exp(BigDecimal(3 / 7r, 100), 100), BigMath.exp(3 / 7r, 100), 1e-99)
   end
 
   def test_BigMath_exp_under_gc_stress
