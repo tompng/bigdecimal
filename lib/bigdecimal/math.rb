@@ -623,25 +623,40 @@ module BigMath
     invx = BigDecimal(1).div(x, prec)
     f = _erfc_exp2_invx(invx, BigDecimal(0), BigDecimal(0), prec)
     return unless f
-    exp(x.mult(x, prec), prec).mult(PI(prec).sqrt(prec) / 2, prec)
     f.div(exp(x.mult(x, prec), prec).mult(PI(prec).sqrt(prec) / 2, prec), prec)
   end
 
   def erfc2(x, prec)
     x = BigDecimal(x)
     invx = BigDecimal(1).div(x, prec)
-    invx0 = invx.round(100)
+    invx0 = invx.round((x.exponent + 1) * 6)
     f0 = _erfc_exp2_invx(invx0, BigDecimal(0), BigDecimal(0), prec)
     return unless f0
     f = _erfc_exp2_invx(invx - invx0, invx0, f0, prec)
     return unless f
-    exp(x.mult(x, prec), prec).mult(PI(prec).sqrt(prec) / 2, prec)
+    f.div(exp(x.mult(x, prec), prec).mult(PI(prec).sqrt(prec) / 2, prec), prec)
+  end
+
+  def erfc3(x, prec)
+    x = BigDecimal(x)
+    invx = BigDecimal(1).div(x, prec)
+    digits = (x.exponent + 1) * 6
+    a = BigDecimal(0)
+    f = BigDecimal(0)
+    while invx != 0
+      partial = invx.truncate(digits)
+      f = _erfc_exp2_invx(partial, a, f, prec)
+      a += partial
+      invx -= partial
+      digits *= 2
+    end
     f.div(exp(x.mult(x, prec), prec).mult(PI(prec).sqrt(prec) / 2, prec), prec)
   end
 
   # Calculates f(a + x) from [x, a, f(a)] using Taylor expansion
   # Where f is defined as f(x) = (sqrt(pi)/2) * exp(1/x**2) * erfc(1/x)
   def _erfc_exp2_invx(x, a, f_a, prec)
+    return f_a if x.zero?
     # f(x) satisfies the following differential equation:
     # (a+x)**3*f'(a+x) + 2*f(a+x) = a + x
     # From the above equation, we can derive the following Taylor expansion around x=a:
@@ -687,71 +702,10 @@ module BigMath
       d = cn.mult(xpow, prec)
       sum = sum.add(d, prec)
       return sum if d.exponent < -prec # TODO: cm1
-      break (p(:err);nil) if n > 50
+      return (p :err) if cn.abs > cm1.abs && cn.abs > cm2.abs
     end
   end
 
-  # Calculates f(a + x) from [x, a, f(a)] using Taylor expansion
-  # Where f is defined as f(x) = (sqrt(pi)/2) * exp(x + 1/x**2) * erfc(1/x)
-  def _erfc_exp2_invx_exp2(x, a, f_a, prec)
-    # f(x) satisfies the following differential equation:
-    # (a+x)**3*f'(a+x) = ((a+x)**3 - 2)*f(a+x) = e**a*(a + x)e**x
-    # From the above equation, we can derive the following Taylor expansion around x=a:
-    # Coefficients: f(a + x) = c0 + c1*x + c2*x**2 + c3*x**3 + ...
-    # Constraints:
-    #   (x**3 + 3*a*x**2 + 3*a**2*x + a**3) * (c1 + 2*c2*x + 3*c3*x**2 + 4*c4*x**3 + ...)
-    #   = (x**3 + 3*a*x**2 + 3*a**2*x + a**3 - 2) * (c0 + c1*x + c2*x**2 + c3*x**3 + ...)
-    #     + (x+a) * exp(a) * sum{x**n/n!}
-    # Recurrence relations:
-    #   c0 = f(a)
-    #   coeff of x**0
-    #     c1 * a**3 = c0 * a**3 + a
-    #   c1 = c0 + exp(a)/a**2
-    #   coeff of x**1
-    #     c1 * 3*a**2 + 2*c2*a**3 = c0 * 3*a**2 + c1*(a**3 - 2) + exp(a) * (a/1! + 1/0!)
-    #   coeff of x**2
-    #     c1 * 3*a + 2*c2*3*a**2 + 3*c3*a**3 = c2*(a**3 - 2) + c1*3*a**2 + c0*3*a + exp(a) * (a/2! + 1/1!)
-    #   coeff of x**3
-    #     c1 + 2*c2*3*a + 3*c3*3*a**2 + 4*c4*a**3 = c3*(a**3 - 2) + c2*3*a**2 + c1*3*a + c0 + exp(a) * (a/3! + 1/2!)
-    #   coeff of x**n
-    #     (n-2)*c(n-2) + (n-1)*3*a*c(n-1) + n*3*a**2*c(n) + (n+1)*a**3*c(n+1) = c(n)*(a**3 - 2) + c(n-1)*3*a**2 + c(n-2)*3*a + c(n-3) + exp(a) * (a/n! + 1/(n-1)!)
-    if a.zero?
-      # If a = 0, the recurrence relations are:
-      #   c0 = 0, c1 = 1/2, c2 = -1/2
-      # c(n) =  (c(n-3) - (n-2)*c(n-2) + 1/(n-1)!) / 2
-      # 0 = c2*(- 2) + 1
-      sum = c = x / 2
-      xx = x.mult(x, prec)
-      (1..).each do |n|
-        cprev = c
-        c = cprev.mult(1 - 2 * n, prec).div(2, prec).mult(xx, prec)
-        sum = sum.add(c, prec)
-        return sum if c.exponent < -prec
-        return if c.abs > cprev.abs
-      end
-    end
-
-    aa = a.mult(a, prec)
-    aaa = aa.mult(a, prec)
-    c0 = f_a
-    c1 = (a - 2 * c0).div(aaa, prec)
-    c2 = (1 - 3 * aa * c1 - 2 * c1).div(aaa * 2, prec)
-    c3 = -(3 * a * c1 + 6 * aa * c2 + 2 * c2).div(aaa * 3, prec)
-    xx = x.mult(x, prec)
-    xxx = xx.mult(x, prec)
-    sum = (c0 + c1 * x + c2 * xx + c3 * xxx).mult(1, prec)
-    cm3, cm2, cm1 = c1, c2, c3
-    xpow = xxx
-    (4..).each do |n|
-      xpow = xpow.mult(x, prec)
-      cn = -((n - 3) * cm3 + 3 * a * (n - 2) * cm2 + 3 * aa * (n - 1) * cm1 + 2 * cm1).div(aaa.mult(n, prec), prec)
-      cm3, cm2, cm1 = cm2, cm1, cn
-      d = cn.mult(xpow, prec)
-      sum = sum.add(d, prec)
-      return sum if d.exponent < -prec # TODO: cm1
-      break (p(:err);nil) if n > 50
-    end
-  end
 
   # Calculates asymptotic expansion of erfc(x)*exp(x**2)*sqrt(pi)/2 with binary splitting method
   private_class_method def _erfc_exp2_asymptotic_binary_splitting(x, prec) # :nodoc:
