@@ -576,6 +576,293 @@ module BigMath
     exp_prec > 0 ? exp(x, exp_prec).sub(1, prec) : BigDecimal(-1)
   end
 
+  def erf_bit_burst(x, prec)
+    x = BigDecimal::Internal.coerce_to_bigdecimal(x, prec, :erf)
+    prec = BigDecimal::Internal.coerce_validate_prec(prec, :erf)
+
+    return BigDecimal(0) if x > 5000000000 # erfc underflows
+    x = x.mult(1, [prec - (x.to_f**2/Math.log(10)).floor, 1].max)
+
+    calculated_x = BigDecimal(0)
+    erf_exp2 = BigDecimal(0)
+    digits = 8
+    xf = x.to_f
+    sqrt_pi = PI(prec).sqrt(prec)
+    scale = 2 * exp(-x.mult(x, prec), prec).div(sqrt_pi, prec)
+
+    if xf > 8
+      log10_erfc = -xf ** 2 / Math.log(10) - Math.log10(xf * Math::PI ** 0.5)
+      erfc_prec = prec + log10_erfc.ceil
+      return BigDecimal(1) if erfc_prec <= 0
+
+      x_rounded = x.truncate(digits)
+      erfc_exp2 = _erfc_exp2_asymptotic_binary_splitting(x_rounded, erfc_prec)
+      if erfc_exp2
+        p :erfc
+        x -= x_rounded
+        calculated_x = x_rounded
+        erf_exp2 = exp(x_rounded**2, prec).mult(sqrt_pi, prec) / 2 - erfc_exp2
+        digits *= 2
+      end
+    end
+
+    until x.zero?
+      x_rounded = x.truncate(digits)
+      digits *= 2
+      next if x_rounded.zero?
+
+      erf_exp2 = _erf_exp2_binary_splitting(x_rounded, calculated_x, erf_exp2, prec)
+      calculated_x += x_rounded
+      x -= x_rounded
+    end
+    erf_exp2.mult(scale, prec)
+  end
+
+  def erfc(x, prec)
+    x = BigDecimal(x)
+    invx = BigDecimal(1).div(x, prec)
+    f = _erfc_exp2_invx(invx, BigDecimal(0), BigDecimal(0), prec)
+    return unless f
+    exp(x.mult(x, prec), prec).mult(PI(prec).sqrt(prec) / 2, prec)
+    f.div(exp(x.mult(x, prec), prec).mult(PI(prec).sqrt(prec) / 2, prec), prec)
+  end
+
+  def erfc2(x, prec)
+    x = BigDecimal(x)
+    invx = BigDecimal(1).div(x, prec)
+    invx0 = invx.round(100)
+    f0 = _erfc_exp2_invx(invx0, BigDecimal(0), BigDecimal(0), prec)
+    return unless f0
+    f = _erfc_exp2_invx(invx - invx0, invx0, f0, prec)
+    return unless f
+    exp(x.mult(x, prec), prec).mult(PI(prec).sqrt(prec) / 2, prec)
+    f.div(exp(x.mult(x, prec), prec).mult(PI(prec).sqrt(prec) / 2, prec), prec)
+  end
+
+  # Calculates f(a + x) from [x, a, f(a)] using Taylor expansion
+  # Where f is defined as f(x) = (sqrt(pi)/2) * exp(1/x**2) * erfc(1/x)
+  def _erfc_exp2_invx(x, a, f_a, prec)
+    # f(x) satisfies the following differential equation:
+    # (a+x)**3*f'(a+x) + 2*f(a+x) = a + x
+    # From the above equation, we can derive the following Taylor expansion around x=a:
+    # Coefficients: f(a + x) = c0 + c1*x + c2*x**2 + c3*x**3 + ...
+    # Constraints:
+    #   (x**3 + 3*a*x**2 + 3*a**2*x + a**3) * (c1 + 2*c2*x + 3*c3*x**2 + 4*c4*x**3 + ...)
+    #   + 2 * (c0 + c1*x + c2*x**2 + c3*x**3 + ...) = a + x
+    # Recurrence relations:
+    #   c0 = f(a)
+    #   c1 = (a - 2 * c0) / a**3
+    #   c2 = (1 - 3*a**2*c1 - 2*c1) / a**3 / 2
+    #   c3 = -(3*a*c1 + 6*a*a*c2 + 2*c2) / a**3 / 3
+    #   c(n) = -((n-3)*c(n-3) + 3*a*(n-2)*c(n-2) + 3*a**2*(n-1)*c(n-1) + 2*c(n-1)) / a**3 / n
+    if a.zero?
+      # If a = 0, the recurrence relations are:
+      #   c0 = 0, c1 = 1/2, cn = -(n-2)*c(n-2) / 2
+      sum = c = x / 2
+      xx = x.mult(x, prec)
+      (1..).each do |n|
+        cprev = c
+        c = cprev.mult(1 - 2 * n, prec).div(2, prec).mult(xx, prec)
+        sum = sum.add(c, prec)
+        return sum if c.exponent < -prec
+        return if c.abs > cprev.abs
+      end
+    end
+
+    aa = a.mult(a, prec)
+    aaa = aa.mult(a, prec)
+    c0 = f_a
+    c1 = (a - 2 * c0).div(aaa, prec)
+    c2 = (1 - 3 * aa * c1 - 2 * c1).div(aaa * 2, prec)
+    c3 = -(3 * a * c1 + 6 * aa * c2 + 2 * c2).div(aaa * 3, prec)
+    xx = x.mult(x, prec)
+    xxx = xx.mult(x, prec)
+    sum = (c0 + c1 * x + c2 * xx + c3 * xxx).mult(1, prec)
+    cm3, cm2, cm1 = c1, c2, c3
+    xpow = xxx
+    (4..).each do |n|
+      xpow = xpow.mult(x, prec)
+      cn = -((n - 3) * cm3 + 3 * a * (n - 2) * cm2 + 3 * aa * (n - 1) * cm1 + 2 * cm1).div(aaa.mult(n, prec), prec)
+      cm3, cm2, cm1 = cm2, cm1, cn
+      d = cn.mult(xpow, prec)
+      sum = sum.add(d, prec)
+      return sum if d.exponent < -prec # TODO: cm1
+      break (p(:err);nil) if n > 50
+    end
+  end
+
+  # Calculates f(a + x) from [x, a, f(a)] using Taylor expansion
+  # Where f is defined as f(x) = (sqrt(pi)/2) * exp(x + 1/x**2) * erfc(1/x)
+  def _erfc_exp2_invx_exp2(x, a, f_a, prec)
+    # f(x) satisfies the following differential equation:
+    # (a+x)**3*f'(a+x) = ((a+x)**3 - 2)*f(a+x) = e**a*(a + x)e**x
+    # From the above equation, we can derive the following Taylor expansion around x=a:
+    # Coefficients: f(a + x) = c0 + c1*x + c2*x**2 + c3*x**3 + ...
+    # Constraints:
+    #   (x**3 + 3*a*x**2 + 3*a**2*x + a**3) * (c1 + 2*c2*x + 3*c3*x**2 + 4*c4*x**3 + ...)
+    #   = (x**3 + 3*a*x**2 + 3*a**2*x + a**3 - 2) * (c0 + c1*x + c2*x**2 + c3*x**3 + ...)
+    #     + (x+a) * exp(a) * sum{x**n/n!}
+    # Recurrence relations:
+    #   c0 = f(a)
+    #   coeff of x**0
+    #     c1 * a**3 = c0 * a**3 + a
+    #   c1 = c0 + exp(a)/a**2
+    #   coeff of x**1
+    #     c1 * 3*a**2 + 2*c2*a**3 = c0 * 3*a**2 + c1*(a**3 - 2) + exp(a) * (a/1! + 1/0!)
+    #   coeff of x**2
+    #     c1 * 3*a + 2*c2*3*a**2 + 3*c3*a**3 = c2*(a**3 - 2) + c1*3*a**2 + c0*3*a + exp(a) * (a/2! + 1/1!)
+    #   coeff of x**3
+    #     c1 + 2*c2*3*a + 3*c3*3*a**2 + 4*c4*a**3 = c3*(a**3 - 2) + c2*3*a**2 + c1*3*a + c0 + exp(a) * (a/3! + 1/2!)
+    #   coeff of x**n
+    #     (n-2)*c(n-2) + (n-1)*3*a*c(n-1) + n*3*a**2*c(n) + (n+1)*a**3*c(n+1) = c(n)*(a**3 - 2) + c(n-1)*3*a**2 + c(n-2)*3*a + c(n-3) + exp(a) * (a/n! + 1/(n-1)!)
+    if a.zero?
+      # If a = 0, the recurrence relations are:
+      #   c0 = 0, c1 = 1/2, c2 = -1/2
+      # c(n) =  (c(n-3) - (n-2)*c(n-2) + 1/(n-1)!) / 2
+      # 0 = c2*(- 2) + 1
+      sum = c = x / 2
+      xx = x.mult(x, prec)
+      (1..).each do |n|
+        cprev = c
+        c = cprev.mult(1 - 2 * n, prec).div(2, prec).mult(xx, prec)
+        sum = sum.add(c, prec)
+        return sum if c.exponent < -prec
+        return if c.abs > cprev.abs
+      end
+    end
+
+    aa = a.mult(a, prec)
+    aaa = aa.mult(a, prec)
+    c0 = f_a
+    c1 = (a - 2 * c0).div(aaa, prec)
+    c2 = (1 - 3 * aa * c1 - 2 * c1).div(aaa * 2, prec)
+    c3 = -(3 * a * c1 + 6 * aa * c2 + 2 * c2).div(aaa * 3, prec)
+    xx = x.mult(x, prec)
+    xxx = xx.mult(x, prec)
+    sum = (c0 + c1 * x + c2 * xx + c3 * xxx).mult(1, prec)
+    cm3, cm2, cm1 = c1, c2, c3
+    xpow = xxx
+    (4..).each do |n|
+      xpow = xpow.mult(x, prec)
+      cn = -((n - 3) * cm3 + 3 * a * (n - 2) * cm2 + 3 * aa * (n - 1) * cm1 + 2 * cm1).div(aaa.mult(n, prec), prec)
+      cm3, cm2, cm1 = cm2, cm1, cn
+      d = cn.mult(xpow, prec)
+      sum = sum.add(d, prec)
+      return sum if d.exponent < -prec # TODO: cm1
+      break (p(:err);nil) if n > 50
+    end
+  end
+
+  # Calculates asymptotic expansion of erfc(x)*exp(x**2)*sqrt(pi)/2 with binary splitting method
+  private_class_method def _erfc_exp2_asymptotic_binary_splitting(x, prec) # :nodoc:
+    # Let f(x) = erfc(x)*sqrt(pi)*exp(x**2)/2
+    # f(x) satisfies the following differential equation:
+    # 2*x*f(x) = f'(x) + 1
+    # From the above equation, we can derive the following asymptotic expansion:
+    # f(x) = (0..kmax).sum { (-1)**k * (2*k)! / 4**k / k! / x**(2*k)) } / x
+
+    # This asymptotic expansion does not converge.
+    # But if there is a k that satisfies (2*k)! / 4**k / k! / x**(2*k) < 10**(-prec),
+    # It is enough to calculate erfc within the given precision.
+    # Using Stirling's approximation, we can simplify this condition to:
+    # sqrt(2)/2 + k*log(k) - k - 2*k*log(x) < -prec*log(10)
+    # and the left side is minimized when k = x**2.
+    xf = x.to_f
+    kmax = (1..(xf ** 2).floor).bsearch do |k|
+      Math.log(2) / 2 + k * Math.log(k) - k - 2 * k * Math.log(xf) < -prec * Math.log(10)
+    end
+    return unless kmax
+
+    # Convert asymptotic expansion to nested form:
+    # 1 + a/x + a*b/x/x + a*b*c/x/x/x + a*b*c/x/x/x*rest
+    # = 1 + (a/x) * (1 + (b/x) * (1 + (c/x) * (1 + rest)))
+    #
+    # And calculate it with binary splitting:
+    # (a1/c1 + b1/c1 * (a2/c2 + b2/c2 * (rest)))
+    # = ((a1*c2+b1*a2)/c1/c2 + b1*b2/c1/c2 * (rest)))
+    x2 = x.mult(x, prec)
+    two_x2 = 2 * x2
+    fractions = (1..kmax).map do |k|
+      [two_x2, BigDecimal(1 - 2 * k), two_x2]
+    end
+    while fractions.size > 1
+      fractions = fractions.each_slice(2).map do |fraction1, fraction2|
+        next fraction1 unless fraction2
+        a1, b1, c1 = fraction1
+        a2, b2, c2 = fraction2
+        [
+          a1.mult(c2, prec).add(b1.mult(a2, prec), prec),
+          b1.mult(b2, prec),
+          c1.mult(c2, prec)
+        ]
+      end
+    end
+    sum = fractions[0][0].add(fractions[0][1], prec).div(fractions[0][2], prec)
+    sum.div(x, prec) / 2
+  end
+
+  # Calculates Taylor expansion of erf(x+a)*exp((x+a)**2)*sqrt(pi)/2 with binary splitting method
+  private_class_method def _erf_exp2_binary_splitting(x, a, f_a, prec) # :nodoc:
+    cexponent = Math.log10([2 * a, Math.sqrt(2)].max.to_f) + log10(x.abs, 10)
+    log10f = Math.log(10)
+
+    steps = (1..).bsearch do |n|
+      x.to_f ** 2 < n && n * cexponent + Math.lgamma(n / 2)[0] / log10f + n * Math.log10(2) - Math.lgamma(n - 1)[0] / log10f < -prec + x.to_f**2 / log10f
+    end
+
+    if a == 0
+      return x.mult(1 + BigDecimal::Internal.taylor_sum_binary_splitting(2 * x * x, (steps / 2).times.map { 2 * _1 + 3 }, prec), prec)
+    end
+
+    # First, calculate a matrix that represents the sum of the Taylor series:
+    # SumMatrix = (((((...+I)x*M4+I)*x*M3+I)*M2*x+I)*M1*x+I)
+    # Where Mi is a 2x2 matrix that generates the next coefficients of Taylor series:
+    # Vector[c5, c4] = M4*M3*M2*M1*Vector[c1, c0]
+    # And then calculates:
+    # SumMatrix * Vector[v1, v0] = Vector[_, c0+c1*x+c2*x**2+...]
+    # In this binary splitting method, adjacent two operations are combined into one repeatedly.
+    # ((...) * x * A + B) / C is the form of each operation. A and B are 2x2 matrices, C is a scalar.
+    zero = BigDecimal(0)
+    two = BigDecimal(2)
+    two_a = two * a
+    operations = steps.times.map do |i|
+      n = BigDecimal(2 + i)
+      [[two_a, two, n, zero], [n, zero, zero, n], n]
+    end
+
+    while operations.size > 1
+      xpow = xpow ? xpow.mult(xpow, prec) : x.mult(1, prec)
+      operations = operations.each_slice(2).map do |operation1, operation2|
+        # Combine two operations into one:
+        # (((Remaining * x * A2 + B2) / C2) * x * A1 + B1) / C1
+        # ((Remaining * (x*x) * (A2*A1) + (x*B2*A1+B1*C2)) / (C1*C2)
+        # Therefore, combined operation can be represented as:
+        # Anext = A2 * A1
+        # Bnext = x * B2 * A1 + B1 * C2
+        # Cnext = C1 * C2
+        # xnext = x * x
+        a1, b1, c1 = operation1
+        a2, b2, c2 = operation2 || [[zero, zero, zero, zero], [zero, zero, zero, zero], BigDecimal(1)]
+        [
+          [
+            (a2[0] * a1[0]).add(a2[1] * a1[2], prec),
+            (a2[0] * a1[1]).add(a2[1] * a1[3], prec),
+            (a2[2] * a1[0]).add(a2[3] * a1[2], prec),
+            (a2[2] * a1[1]).add(a2[3] * a1[3], prec)
+          ],
+          [
+            (b2[0] * a1[0]).add(b2[1] * a1[2], prec).mult(xpow, prec).add(b1[0] * c2, prec),
+            (b2[0] * a1[1]).add(b2[1] * a1[3], prec).mult(xpow, prec).add(b1[1] * c2, prec),
+            (b2[2] * a1[0]).add(b2[3] * a1[2], prec).mult(xpow, prec).add(b1[2] * c2, prec),
+            (b2[2] * a1[1]).add(b2[3] * a1[3], prec).mult(xpow, prec).add(b1[3] * c2, prec)
+          ],
+          c1.mult(c2, prec)
+        ]
+      end
+    end
+    _, numerator_matrix, denominator = operations.first
+    (numerator_matrix[2] + f_a * (2 * a * numerator_matrix[2] + numerator_matrix[3])).div(denominator, prec)
+  end
 
   # call-seq:
   #   PI(numeric) -> BigDecimal
@@ -588,38 +875,18 @@ module BigMath
   #
   def PI(prec)
     prec = BigDecimal::Internal.coerce_validate_prec(prec, :PI)
-    n      = prec + BigDecimal.double_fig
-    zero   = BigDecimal("0")
-    one    = BigDecimal("1")
-    two    = BigDecimal("2")
-
-    m25    = BigDecimal("-0.04")
-    m57121 = BigDecimal("-57121")
-
-    pi     = zero
-
-    d = one
-    k = one
-    t = BigDecimal("-80")
-    while d.nonzero? && ((m = n - (pi.exponent - d.exponent).abs) > 0)
-      m = BigDecimal.double_fig if m < BigDecimal.double_fig
-      t   = t*m25
-      d   = t.div(k,m)
-      k   = k+two
-      pi  = pi + d
+    n = prec + BigDecimal.double_fig
+    a = BigDecimal(1)
+    b = BigDecimal(0.5, 0).sqrt(n)
+    s = BigDecimal(0.25, 0)
+    t = 1
+    while a != b && (a - b).exponent > 1 - n
+      c = (a - b).div(2, n)
+      a, b = (a + b).div(2, n), (a * b).sqrt(n)
+      s = s.sub(c * c * t, n)
+      t *= 2
     end
-
-    d = one
-    k = one
-    t = BigDecimal("956")
-    while d.nonzero? && ((m = n - (pi.exponent - d.exponent).abs) > 0)
-      m = BigDecimal.double_fig if m < BigDecimal.double_fig
-      t   = t.div(m57121,n)
-      d   = t.div(k,m)
-      pi  = pi + d
-      k   = k+two
-    end
-    pi.mult(1, prec)
+    (a * b).div(s, prec)
   end
 
   # call-seq:
