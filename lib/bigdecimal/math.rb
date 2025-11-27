@@ -621,7 +621,7 @@ module BigMath
   def erfc(x, prec)
     x = BigDecimal(x)
     invx = BigDecimal(1).div(x, prec)
-    f = _erfc_exp2_invx(invx, BigDecimal(0), BigDecimal(0), prec)
+    f = _erfc_exp2_invx_binary_splitting_zero(invx, prec)
     return unless f
     f.div(exp(x.mult(x, prec), prec).mult(PI(prec).sqrt(prec) / 2, prec), prec)
   end
@@ -630,7 +630,7 @@ module BigMath
     x = BigDecimal(x)
     invx = BigDecimal(1).div(x, prec)
     invx0 = invx.round((x.exponent + 1) * 6)
-    f0 = _erfc_exp2_invx(invx0, BigDecimal(0), BigDecimal(0), prec)
+    f0 = _erfc_exp2_invx_binary_splitting_zero(invx0, prec)
     return unless f0
     f = _erfc_exp2_invx(invx - invx0, invx0, f0, prec)
     return unless f
@@ -641,14 +641,16 @@ module BigMath
     x = BigDecimal(x)
     invx = BigDecimal(1).div(x, prec)
     digits = (x.exponent + 1) * 6
-    a = BigDecimal(0)
-    f = BigDecimal(0)
+    digits = (x.exponent + 1) * 6
+    a = invx.truncate(digits)
+    f = _erfc_exp2_invx_binary_splitting_zero(a, prec)
+    invx -= a
     while invx != 0
+      digits *= 2
       partial = invx.truncate(digits)
       f = _erfc_exp2_invx(partial, a, f, prec)
       a += partial
       invx -= partial
-      digits *= 2
     end
     f.div(exp(x.mult(x, prec), prec).mult(PI(prec).sqrt(prec) / 2, prec), prec)
   end
@@ -670,32 +672,17 @@ module BigMath
     #   c2 = (1 - 3*a**2*c1 - 2*c1) / a**3 / 2
     #   c3 = -(3*a*c1 + 6*a*a*c2 + 2*c2) / a**3 / 3
     #   c(n) = -((n-3)*c(n-3) + 3*a*(n-2)*c(n-2) + 3*a**2*(n-1)*c(n-1) + 2*c(n-1)) / a**3 / n
-    if a.zero?
-      # If a = 0, the recurrence relations are:
-      #   c0 = 0, c1 = 1/2, cn = -(n-2)*c(n-2) / 2
-      sum = c = x / 2
-      xx = x.mult(x, prec)
-      (1..).each do |n|
-        cprev = c
-        c = cprev.mult(1 - 2 * n, prec).div(2, prec).mult(xx, prec)
-        sum = sum.add(c, prec)
-        return sum if c.exponent < -prec
-        return if c.abs > cprev.abs
-      end
-    end
 
     aa = a.mult(a, prec)
     aaa = aa.mult(a, prec)
     c0 = f_a
     c1 = (a - 2 * c0).div(aaa, prec)
     c2 = (1 - 3 * aa * c1 - 2 * c1).div(aaa * 2, prec)
-    c3 = -(3 * a * c1 + 6 * aa * c2 + 2 * c2).div(aaa * 3, prec)
     xx = x.mult(x, prec)
-    xxx = xx.mult(x, prec)
-    sum = (c0 + c1 * x + c2 * xx + c3 * xxx).mult(1, prec)
-    cm3, cm2, cm1 = c1, c2, c3
-    xpow = xxx
-    (4..).each do |n|
+    sum = (c0 + c1 * x + c2 * xx).mult(1, prec)
+    cm3, cm2, cm1 = c0, c1, c2
+    xpow = xx
+    (3..).each do |n|
       xpow = xpow.mult(x, prec)
       cn = -((n - 3) * cm3 + 3 * a * (n - 2) * cm2 + 3 * aa * (n - 1) * cm1 + 2 * cm1).div(aaa.mult(n, prec), prec)
       cm3, cm2, cm1 = cm2, cm1, cn
@@ -706,6 +693,49 @@ module BigMath
     end
   end
 
+  # Calculates asymptotic expansion of erfc(x)*exp(x**2)*sqrt(pi)/2 with binary splitting method
+  private_class_method def _erfc_exp2_invx_binary_splitting_zero(x, prec) # :nodoc:
+    # Let f(x) = erfc(1/x)*sqrt(pi)*exp(1/x**2)/2
+    # f(x) = (0..kmax).sum { (-1)**k * (2*k)! / 2**k / k! * (2*x**2)**k) } * x
+
+    # This asymptotic expansion does not converge.
+    # But if there is a k that satisfies (2*k)! / 4**k / k! / x**(2*k) < 10**(-prec),
+    # It is enough to calculate erfc within the given precision.
+    # Using Stirling's approximation, we can simplify this condition to:
+    # sqrt(2)/2 + k*log(k) - k - 2*k*log(x) < -prec*log(10)
+    # and the left side is minimized when k = x**2.
+    xf = 1 / x.to_f
+    kmax = (1..(xf ** 2).floor).bsearch do |k|
+      Math.log(2) / 2 + k * Math.log(k) - k - 2 * k * Math.log(xf) < -prec * Math.log(10)
+    end
+    return unless kmax
+
+    # Convert asymptotic expansion to nested form:
+    # 1 + a*x + a*b*x*x + a*b*c*x*x*x + a*b*c*x*x*x*rest
+    # = 1 + (a*x) * (1 + (b*x) * (1 + (c*x) * (rest)))
+    #
+    # And calculate it with binary splitting:
+    # (a1 + b1*w * (a2 + b2*w * (rest)))
+    # = (a1+b1*a2*w) + (b1*b2)*(w*w) * (rest)
+    one = BigDecimal(1)
+    params = (1..kmax).map do |k|
+      [one, BigDecimal(1 - 2 * k)]
+    end
+    w = nil
+    while params.size > 1
+      w = w ? w.mult(w, prec) : x.mult(x, prec) / 2
+      params = params.each_slice(2).map do |param1, param2|
+        a1, b1 = param1
+        a2, b2 = param2 || [one, BigDecimal(0)]
+        [
+          a1.add(b1.mult(a2, prec).mult(w, prec), prec),
+          b1.mult(b2, prec)
+        ]
+      end
+    end
+    sum = params[0][0]
+    sum.mult(x, prec) / 2
+  end
 
   # Calculates asymptotic expansion of erfc(x)*exp(x**2)*sqrt(pi)/2 with binary splitting method
   private_class_method def _erfc_exp2_asymptotic_binary_splitting(x, prec) # :nodoc:
