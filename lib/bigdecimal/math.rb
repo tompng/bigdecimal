@@ -671,6 +671,29 @@ module BigMath
     f.div(exp(x.mult(x, prec), prec).mult(PI(prec).sqrt(prec) / 2, prec), prec)
   end
 
+  def erfc5(x, prec)
+    x = BigDecimal(x)
+    scale = exp(x.mult(x, prec), prec).mult(PI(prec).sqrt(prec) / 2, prec)
+    digits = (x.exponent + 1) * 40
+
+    a = x.truncate(digits)
+    t = Time.now
+    f = _erfc_exp2_asymptotic_binary_splitting(a, prec)
+    return unless f
+    p Time.now-t
+    x -= a
+    while x != 0
+      digits *= 2
+      partial = x.truncate(digits)
+      t = Time.now
+      f = _erfc_exp2_inv_inv_binary_splitting(partial, a, f, prec)
+      p Time.now-t
+      a += partial
+      x -= partial
+    end
+    f.div(scale, prec)
+  end
+
   # Calculates f(a + x) from [x, a, f(a)] using Taylor expansion
   # Where f is defined as f(x) = (sqrt(pi)/2) * exp(1/x**2) * erfc(1/x)
   def _erfc_exp2_invx(x, a, f_a, prec)
@@ -707,6 +730,102 @@ module BigMath
       return sum if d.exponent < -prec # TODO: cm1
       return (p :err) if cn.abs > cm1.abs && cn.abs > cm2.abs
     end
+  end
+
+  # Calculates f(1/(a + x)) where f(x) = (sqrt(pi)/2) * exp(1/x**2) * erfc(1/x)
+  # f(1/(a+x)) = f(1/a - x/(a*(a+x)))
+  def _erfc_exp2_inv_inv_binary_splitting(x, a, f_inva, prec)
+    return f_inva if x.zero?
+    # f(x) satisfies the following differential equation:
+    # (1/a+w)**3*f'(1/a+w) + 2*f(1/a+w) = 1/a + w
+    # From the above equation, we can derive the following Taylor expansion around x=a:
+    # Coefficients: f(1/a + w) = c0 + c1*w + c2*w**2 + c3*w**3 + ...
+    # Constraints:
+    #   (w**3 + 3*w**2/a + 3*w/a**2 + 1/a**3) * (c1 + 2*c2*w + 3*c3*w**2 + 4*c4*w**3 + ...)
+    #   + 2 * (c0 + c1*w + c2*w**2 + c3*w**3 + ...) = 1/a + w
+    # Recurrence relations:
+    #   c0 = f(1/a)
+    #   c1 = a**2 - 2*c0*a**3
+    #   c2 = (a**3 - 3*c1*a - 2*c1*a**3) / 2
+    #   c3 = -(3*c1*a**2 + 6*c2*a + 2*c2*a**3) / 3
+    #   c(n) = -((n-3)*c(n-3)*a**3 + 3*(n-2)*c(n-2)*a**2 + 3*(n-1)*c(n-1)*a + 2*c(n-1)*a**3) / n
+
+    aa = a.mult(a, prec)
+    aaa = aa.mult(a, prec)
+    c0 = f_inva
+    c1 = (aa - 2 * c0 * aaa).mult(1, prec)
+    c2 = (aaa - 3 * c1 * a - 2 * c1 * aaa).div(2, prec)
+
+    low_prec = 20
+    w = x.div(a.mult(a + x, low_prec), low_prec)
+    wpow = w.mult(w, low_prec)
+    cm3, cm2, cm1 = [c0, c1, c2].map { _1.mult(1, low_prec) }
+    a_low, aa_low, aaa_low = [a, aa, aaa].map { _1.mult(1, low_prec) }
+    break_cond = false
+    step = (3..).each do |n|
+      wpow = wpow.mult(w, low_prec)
+      cn = -((n - 3) * cm3 * aaa_low + 3 * aa_low * (n - 2) * cm2 + 3 * a_low * (n - 1) * cm1 + 2 * cm1 * aaa_low).div(n, low_prec)
+      cm3, cm2, cm1 = cm2, cm1, cn
+      d = cn.mult(wpow, low_prec)
+      if d.exponent < -prec # TODO: cm1
+        break n if break_cond
+        break_cond = true
+      else
+        break_cond = false
+      end
+      return (p :err) if cn.abs > cm1.abs && cn.abs > cm2.abs
+    end
+
+    # Let M(n) be a 3x3 matrix that transforms (c(n-1),c(n-2),c(n-3)) to (c(n),c(n-1),c(n-2))
+    # Mn = | -2*aaa-3*(n-1)*a/n -3*(n-2)*aa/n -(n-3)*aaa/n |
+    #      | 1                  0             0           |
+    #      | 0                  1             0           |
+    # Vector(c8,c7,c6) = M8*M7*M6*M5*M4*M3 * Vector(c2,c1,c0)
+    # Vector(c3+c4*y/z+c5*(y/z)**2+..., ?, ?) = (((... + I)*M5*y/z + I)*M4*y/z + I)*M3*y/z + I) * Vector(c2,c1,c0)
+    # Perform binary splitting on this nested parenthesized calculation by using the following formula:
+    # (((...)*A2*y/z + B2)/D2 * A1*y/z + B1)/D1 = (((...)*(A2*A1)*(y*y)/z + (B2*A1*y+z*D2*B1)) / (D1*D2*z)
+    # where A_n, Bn are matrices and Dn are scalars
+
+    zero = BigDecimal(0)
+    one = BigDecimal(1)
+    operations = (3..step + 2).map do |n|
+      bign = BigDecimal(n)
+      [
+        [
+          -2 * aaa - 3 * (n - 1) * a, -3 * (n - 2) * aa, BigDecimal(-(n - 3) * aaa),
+          bign, zero, zero,
+          zero, bign, zero
+        ],
+        [bign, zero, zero, zero, bign, zero, zero, zero, bign],
+        bign
+      ]
+    end
+
+    matrix_mult = -> (a, b) {
+      9.times.map do |i|
+        mults = 3.times.map do |k|
+          a[i / 3 * 3 + k].mult(b[3 * k + i % 3], prec)
+        end
+        mults[0].add(mults[1], prec).add(mults[2], prec)
+      end
+    }
+    matrix_scale_add = -> (a, s1, b, s2) { a.zip(b).map { (_1 * s1).add(_2 * s2, prec) } }
+
+    z = a.mult(a + x, prec)
+    while operations.size > 1
+      y = y ? y.mult(y, prec) : -x.mult(1, prec)
+      operations = operations.each_slice(2).map do |op1, op2|
+        a1, b1, d1 = op1
+        a2, b2, d2 = op2 || [[zero] * 9, [one, zero, zero, zero, one, zero, zero, zero, one], one]
+        [
+          matrix_mult.call(a2, a1),
+          matrix_scale_add.call(matrix_mult.call(b2, a1), y, b1, d2.mult(z, prec)),
+          d1.mult(d2, prec).mult(z, prec),
+        ]
+      end
+    end
+    _, sum_matrix, denominator = operations[0]
+    (sum_matrix[6] * c2 + sum_matrix[7] * c1 + sum_matrix[8] * c0).div(denominator, prec)
   end
 
   def _erfc_exp2_invx_binary_splitting(x, a, f_a, prec)
@@ -872,26 +991,24 @@ module BigMath
     # = 1 + (a/x) * (1 + (b/x) * (1 + (c/x) * (1 + rest)))
     #
     # And calculate it with binary splitting:
-    # (a1/c1 + b1/c1 * (a2/c2 + b2/c2 * (rest)))
-    # = ((a1*c2+b1*a2)/c1/c2 + b1*b2/c1/c2 * (rest)))
-    x2 = x.mult(x, prec)
-    two_x2 = 2 * x2
+    # (a1/d + b1/d * (a2/d + b2/d * (rest)))
+    # = ((a1*d+b1*a2)/(d*d) + b1*b2/(d*denominator) * (rest)))
+    denominator = x.mult(x, prec).mult(2, prec)
     fractions = (1..kmax).map do |k|
-      [two_x2, BigDecimal(1 - 2 * k), two_x2]
+      [denominator, BigDecimal(1 - 2 * k)]
     end
     while fractions.size > 1
       fractions = fractions.each_slice(2).map do |fraction1, fraction2|
-        next fraction1 unless fraction2
-        a1, b1, c1 = fraction1
-        a2, b2, c2 = fraction2
+        a1, b1 = fraction1
+        a2, b2 = fraction2 || [BigDecimal(0), denominator]
         [
-          a1.mult(c2, prec).add(b1.mult(a2, prec), prec),
+          a1.mult(denominator, prec).add(b1.mult(a2, prec), prec),
           b1.mult(b2, prec),
-          c1.mult(c2, prec)
         ]
       end
+      denominator = denominator.mult(denominator, prec)
     end
-    sum = fractions[0][0].add(fractions[0][1], prec).div(fractions[0][2], prec)
+    sum = fractions[0][0].add(fractions[0][1], prec).div(denominator, prec)
     sum.div(x, prec) / 2
   end
 
