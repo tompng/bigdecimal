@@ -1032,8 +1032,12 @@ class TestBigDecimal < Test::Unit::TestCase
     assert_kind_of(BigDecimal, BigDecimal("3") - 1.0)
   end
 
-  def test_sub_with_rational
+  def test_addsub_with_rational
     assert_kind_of(BigDecimal, BigDecimal("3") - 1.quo(3))
+    assert_equal(BigDecimal("-0.3333333333333333333333333333333333333333e-60"), BigDecimal(1/3r, 60).sub(1/3r, 40))
+    assert_equal(BigDecimal("0.3333333333333333333333333333333333333333e-60"), BigDecimal(-1/3r, 60).add(1/3r, 40))
+    assert_equal(BigDecimal("-0.3333333333333333333333333333333333333333e-20"), BigDecimal(1).sub(1 + 1.quo(3 * 10**20), 40))
+    assert_equal(BigDecimal("-0.3333333333333333333333333333333333333333e-20"), BigDecimal(1).add(-1 - 1.quo(3 * 10**20), 40))
   end
 
   def test_mult

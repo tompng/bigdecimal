@@ -1295,7 +1295,10 @@ BigDecimal_addsub_with_coerce(VALUE self, VALUE r, size_t prec, int operation)
     size_t mx;
 
     a = GetBDValueMust(self);
-    b = GetBDValueWithPrecMust(r, GetCoercePrec(a.real, prec));
+
+    // If prec is given, coerce Rational needs extra digits to avoid loss of significance error.
+    // Although correct rounding of the result is not guaranteed for Rational.
+    b = GetBDValueWithPrecMust(r, GetCoercePrec(a.real, prec) + (prec ? Max(a.real->Prec * BASE_FIG, prec) : 0));
 
     if (VpIsNaN(a.real)) return CheckGetValue(a);
     if (VpIsNaN(b.real)) return CheckGetValue(b);
