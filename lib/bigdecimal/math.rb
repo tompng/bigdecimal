@@ -766,8 +766,46 @@ module BigMath
     [prd, coef]
   end
 
+  def integer_factorial(n, prec, invsqrtpi = nil)
+    # Simple case
+    if n < 2 * prec || n < 100
+      numbers = (1..n).map {|i| BigDecimal(i) }
+      numbers = numbers.each_slice(2).map {|a, b| b ? a.mult(b, prec) : a } while numbers.size > 1
+      return numbers.first || BigDecimal(1)
+    end
+
+    # Use Legendre duplication formula to calculate double factorials:
+    #   factorial(n) = factorial(n/2)*factorial((n-1)/2)*2**n/sqrt(pi)
+    # factorial(b+0.5) can be calculated from factorial(b) with _gamma_lagrange_internal in quasi-linear time
+    invsqrtpi ||= BigDecimal(1).div(PI(prec).sqrt(prec), prec)
+    b = (n + 1) / 2
+    l = prec
+    fact_b_minus_l = integer_factorial(b - l, prec, invsqrtpi)
+    nums = (b - l + 1..n / 2).map {|i| BigDecimal(i) }
+    nums = nums.each_slice(2).map {|a, b| b ? a.mult(b, prec) : a } while nums.size > 1
+    fact_fix = nums.first.mult(fact_b_minus_l, prec)
+    fact_half = _gamma_lagrange_internal(BigDecimal(b) + 0.5, b, l, 0, fact_b_minus_l, prec)
+    p 1
+    fact_fix.mult(fact_half, prec).mult(BigDecimal(2).power(n, prec), prec).mult(invsqrtpi, prec)
+  end
+
+  private_class_method def _gamma_lagrange(x, prec) # :nodoc:
+    shift = x < 2 * prec ? 2 * prec - x.floor : 0
+    x += shift
+    b = x.round
+    l = prec
+    numbers = (1..b-l).map {|i| BigDecimal(i) }
+    numbers = numbers.each_slice(2).map {|a, b| b ? a.mult(b, prec) : a } while numbers.size > 1
+    factorial = numbers.first || BigDecimal(1)
+    _gamma_lagrange_internal(x, b, l, shift, factorial, prec)
+  end
+
   # Calculate approximate gamma by Lagrange interpolation of f(x) = b**x / x!
   # Nodes are placed at x_i = b-l, b-l+1, ..., b+l.
+  # b: x.round, factorial: (b-l)!, l: number of nodes on one side (total nodes = 2*l+1)
+  # shift: 
+  # Shift x to ensure the scaled bell curve b**x/x! is wide enough to cover
+  # all 2*l+1 interpolation nodes without losing significant digits.
   #
   # Mathematically, we use the barycentric interpolation form:
   # f(x) \approx \omega(x) \sum_{i} \frac{w_i f(x_i)}{x - x_i}
@@ -777,21 +815,14 @@ module BigMath
   # - O(N * log^3 N) for small-digit/rational x (Binary Splitting)
   # - O(N^2) for full-digit x (Baby-step Giant-step)
   # Precondition: 0 < x < const * (prec / prec.bit_length)**2
-  private_class_method def _gamma_lagrange(x, prec) # :nodoc:
+  private_class_method def _gamma_lagrange_internal(x, b, l, shift, factorial, prec) # :nodoc:
     x = BigDecimal(x) - 1
-    l = prec
-
-    # Shift x to ensure the scaled bell curve b**x/x! is wide enough to cover
-    # all 2*l+1 interpolation nodes without losing significant digits.
-    shift = x < 2 * prec ? 2 * prec - x.floor : 0
-    x += shift
-    b = x.round
 
     # c0 represents the common large factorial part factored out from the weights
     # to avoid computing massive numbers in every term.
-    c0s = [*(1..b-l), *(1..2*l)]
+    c0s = (1..2*l).to_a
     c0s = c0s.each_slice(2).map {|a, b| b ? BigDecimal(a).mult(b, prec) : BigDecimal(a) } while c0s.size != 1
-    c0 = c0s.first
+    c0 = c0s.first.mult(factorial, prec)
 
     # --- Reference: Naive interpolation logic ---
     # Optimize this calculation for full-digit-x case and small-digit-x case.
@@ -937,6 +968,38 @@ module BigMath
       [log_gamma, 1]
     end
   end
+
+  def bn(n, bns, prec)
+    return bns[0] ||= BigDecimal(1) if n == 0
+    return bns[1] ||= BigDecimal(-0.5) if n == 1
+    return bns[n] ||= BigDecimal(0) if n.odd?
+    bns[n] ||= (
+      comb = 1
+      sum = BigDecimal(0)
+      n.times.each do |i|
+        c = comb
+        comb = comb * (n - i + 1) / (i + 1)
+        sum = sum.add(c * bn(i, bns, prec), prec)
+      end
+      sum.div(-n - 1, prec)
+    )
+  end
+
+  def bn_lgamma(x, prec)
+    x = BigDecimal(x)
+    y = x * BigMath.log(x, prec) - x + BigMath.log(2 * BigMath::PI(prec).div(x, prec), prec)/2
+    bns = []
+    xn = x
+    x2 = x.mult(x, prec)
+    (1..).each do |k|
+      xn = xn.mult(x2, prec) if k != 1
+      d = bn(2*k, bns, prec).div(xn, prec).div(2*k*(2*k-1), prec)
+      y = y.add(d, prec)
+      break if d.exponent < y.exponent - prec
+    end
+    y
+  end
+
 
   # Returns sum part: sqrt(2*pi) and c[k]/(x+k) terms of Spouge's approximation
   private_class_method def _gamma_spouge_sum_part(x, prec) # :nodoc:
