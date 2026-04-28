@@ -734,15 +734,11 @@ module BigMath
       # Euler's reflection formula: gamma(z) * gamma(1-z) = pi/sin(pi*z)
       pi = PI(prec2)
       sin = _sinpix(x, pi, prec2)
-      return pi.div(gamma(1 - x, prec2).mult(sin, prec2), prec)
-    elsif x.frac.zero? && x < 1000 * prec
-      return _gamma_positive_integer(x, prec2).mult(1, prec)
-    elsif x < (prec / prec.bit_length)**2
-      return _gamma_lagrange(x, prec2).mult(1, prec)
+      pi.div(gamma(1 - x, prec2).mult(sin, prec2), prec)
+    else
+      gamma = x.frac.zero? ? _integer_factorial(x.to_i - 1, prec2) : _gamma_lagrange(x, prec2)
+      gamma.mult(1, prec)
     end
-
-    a, sum = _gamma_spouge_sum_part(x, prec2)
-    (x + (a - 1)).power(x - 0.5, prec2).mult(BigMath.exp(1 - x, prec2), prec2).mult(sum, prec)
   end
 
   # Calculates prod{x-k} and its coefficients for given ks, xn and prec with baby-step giant-step method.
@@ -766,9 +762,9 @@ module BigMath
     [prd, coef]
   end
 
-  def integer_factorial(n, prec, invsqrtpi = nil)
+  private_class_method def _integer_factorial(n, prec, invsqrtpi = nil, fact_2prec = nil)
     # Simple case
-    if n < 2 * prec || n < 100
+    if n <= 2 * prec || n < 100
       numbers = (1..n).map {|i| BigDecimal(i) }
       numbers = numbers.each_slice(2).map {|a, b| b ? a.mult(b, prec) : a } while numbers.size > 1
       return numbers.first || BigDecimal(1)
@@ -776,28 +772,52 @@ module BigMath
 
     # Use Legendre duplication formula to calculate double factorials:
     #   factorial(n) = factorial(n/2)*factorial((n-1)/2)*2**n/sqrt(pi)
-    # factorial(b+0.5) can be calculated from factorial(b) with _gamma_lagrange_internal in quasi-linear time
+    # factorial(b+0.5) can be calculated from factorial(b) with _gamma_lagrange_n_plus_half in quasi-linear time
     invsqrtpi ||= BigDecimal(1).div(PI(prec).sqrt(prec), prec)
+    fact_2prec ||= _integer_factorial(2 * prec, prec)
     b = (n + 1) / 2
     l = prec
-    fact_b_minus_l = integer_factorial(b - l, prec, invsqrtpi)
+    fact_b_minus_l = _integer_factorial(b - l, prec, invsqrtpi, fact_2prec)
     nums = (b - l + 1..n / 2).map {|i| BigDecimal(i) }
     nums = nums.each_slice(2).map {|a, b| b ? a.mult(b, prec) : a } while nums.size > 1
     fact_fix = nums.first.mult(fact_b_minus_l, prec)
-    fact_half = _gamma_lagrange_internal(BigDecimal(b) + 0.5, b, l, 0, fact_b_minus_l, prec)
-    p 1
+    fact_half = _gamma_lagrange_n_plus_half(b, b, l, fact_b_minus_l, fact_2prec, prec)
     fact_fix.mult(fact_half, prec).mult(BigDecimal(2).power(n, prec), prec).mult(invsqrtpi, prec)
   end
 
-  private_class_method def _gamma_lagrange(x, prec) # :nodoc:
-    shift = x < 2 * prec ? 2 * prec - x.floor : 0
-    x += shift
-    b = x.round
-    l = prec
-    numbers = (1..b-l).map {|i| BigDecimal(i) }
-    numbers = numbers.each_slice(2).map {|a, b| b ? a.mult(b, prec) : a } while numbers.size > 1
-    factorial = numbers.first || BigDecimal(1)
-    _gamma_lagrange_internal(x, b, l, shift, factorial, prec)
+  private_class_method def _gamma_lagrange_n_plus_half(n, b, l, factorial, fact_2l, prec) # :nodoc:
+    # c0 represents the common large factorial part factored out from the weights
+    # to avoid computing massive numbers in every term.
+    base = factorial.mult(fact_2l, prec)
+    prods = ((b-l)..(b+l)).map {|i| 2 * n - 2 * i - 1 }
+    prods = prods.each_slice(2).map {|a, b| b ? a * b : a } while prods.size != 1
+    prod = BigDecimal(prods.first >> (2 * l + 1))
+
+    # State represents: [Base_Denominator, Numerator, Denominator_Multiplier]
+    fractions = (b - l + 1..b + l).map do |i|
+      denominator = (2 * n - 1 - 2 * i) * ((i - b + l) * i)
+      numerator = (2 * n + 1 - 2 * i) * (-b * (b + l - i + 1))
+      [denominator, numerator, denominator]
+    end
+    while fractions.size > 1
+      fractions = fractions.each_slice(2).map do |a, b|
+        b ||= [1, 0, 1]
+        v0 = a[0] * b[2] + a[1] * b[0]
+        v1 = a[1] * b[1]
+        v2 = a[2] * b[2]
+        if v2.bit_length > prec * 4
+          s = v2.bit_length - prec * 4
+          v0 >>= s
+          v1 >>= s
+          v2 >>= s
+        end
+        [v0, v1, v2]
+      end
+    end
+    fraction = fractions.first
+    sum = BigDecimal((fraction[0] + fraction[1]) * 2).div(fraction[2] * (2 * (n  - b + l) - 1), prec)
+    ans = BigDecimal(b).power(n - b + l, prec).div(BigDecimal(b).sqrt(prec), prec).div(sum.mult(prod, prec), prec).mult(base, prec)
+    ans
   end
 
   # Calculate approximate gamma by Lagrange interpolation of f(x) = b**x / x!
@@ -815,7 +835,12 @@ module BigMath
   # - O(N * log^3 N) for small-digit/rational x (Binary Splitting)
   # - O(N^2) for full-digit x (Baby-step Giant-step)
   # Precondition: 0 < x < const * (prec / prec.bit_length)**2
-  private_class_method def _gamma_lagrange_internal(x, b, l, shift, factorial, prec) # :nodoc:
+  private_class_method def _gamma_lagrange(x, prec) # :nodoc:
+    shift = x < 2 * prec ? 2 * prec - x.floor : 0
+    x += shift
+    b = x.round
+    l = prec
+    factorial = _integer_factorial(b - l, prec)
     x = BigDecimal(x) - 1
 
     # c0 represents the common large factorial part factored out from the weights
@@ -937,9 +962,6 @@ module BigMath
         # Retry with higher precision if loss of significance is too large
         prec2 = prec2 * 3 / 2
       end
-    elsif x.frac.zero? && x < 1000 * prec
-      log_gamma = BigMath.log(_gamma_positive_integer(x, prec2), prec)
-      [log_gamma, 1]
     else
       # if x is close to 1 or 2, increase precision to reduce loss of significance
       diff1_exponent = (x - 1).exponent
@@ -960,12 +982,13 @@ module BigMath
       prec2 += [-diff1_exponent, -diff2_exponent, 0].max
 
       if x < (prec / prec.bit_length)**2
-        log_gamma = BigMath.log(_gamma_lagrange(x, prec2), prec)
+        gamma = x.frac.zero? ? _integer_factorial(x.to_i - 1, prec2) : _gamma_lagrange(x, prec2)
+        [BigMath.log(gamma, prec), 1]
       else
         a, sum = _gamma_spouge_sum_part(x, prec2)
         log_gamma = BigMath.log(sum, prec2).add((x - 0.5).mult(BigMath.log(x.add(a - 1, prec2), prec2), prec2) + 1 - x, prec)
+        [log_gamma, 1]
       end
-      [log_gamma, 1]
     end
   end
 
@@ -1040,15 +1063,6 @@ module BigMath
       sum = sum.add(z, prec2)
     end
     [a, sum]
-  end
-
-  private_class_method def _gamma_positive_integer(x, prec) # :nodoc:
-    return x if x == 1
-    numbers = (1..x - 1).map {|i| BigDecimal(i) }
-    while numbers.size > 1
-      numbers = numbers.each_slice(2).map {|a, b| b ? a.mult(b, prec) : a }
-    end
-    numbers.first
   end
 
   # Returns sin(pi * x), for gamma reflection formula calculation
