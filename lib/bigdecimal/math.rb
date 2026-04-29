@@ -764,7 +764,7 @@ module BigMath
 
   private_class_method def _integer_factorial(n, prec, invsqrtpi = nil, fact_2prec = nil)
     # Simple case
-    if n <= 2 * prec || n < 100
+    if n <= 50 * prec
       numbers = (1..n).map {|i| BigDecimal(i) }
       numbers = numbers.each_slice(2).map {|a, b| b ? a.mult(b, prec) : a } while numbers.size > 1
       return numbers.first || BigDecimal(1)
@@ -785,10 +785,8 @@ module BigMath
     fact_fix.mult(fact_half, prec).mult(BigDecimal(2).power(n, prec), prec).mult(invsqrtpi, prec)
   end
 
-  private_class_method def _gamma_lagrange_n_plus_half(n, b, l, factorial, fact_2l, prec) # :nodoc:
-    # c0 represents the common large factorial part factored out from the weights
-    # to avoid computing massive numbers in every term.
-    base = factorial.mult(fact_2l, prec)
+  private_class_method def _gamma_lagrange_n_plus_half(n, b, l, fact_b_minus_l, fact_2l, prec) # :nodoc:
+    base = fact_b_minus_l.mult(fact_2l, prec)
     prods = ((b-l)..(b+l)).map {|i| 2 * n - 2 * i - 1 }
     prods = prods.each_slice(2).map {|a, b| b ? a * b : a } while prods.size != 1
     prod = BigDecimal(prods.first >> (2 * l + 1))
@@ -945,7 +943,7 @@ module BigMath
   #   BigMath.lgamma(BigDecimal('0.5'), 32)
   #   #=> [0.57236494292470008707171367567653e0, 1]
   #
-  def lgamma(x, prec)
+  def lgamma(x, prec, method: nil)
     prec = BigDecimal::Internal.coerce_validate_prec(prec, :lgamma)
     x = BigDecimal::Internal.coerce_to_bigdecimal(x, prec, :lgamma)
     prec2 = prec + BigDecimal::Internal::EXTRA_PREC
@@ -981,13 +979,12 @@ module BigMath
 
       prec2 += [-diff1_exponent, -diff2_exponent, 0].max
 
-      if x < (prec / prec.bit_length)**2
+      if method == :bernoulli || (method != :lagrange && (x.exponent > Integer.sqrt(prec / 40) + 10))
+        [bn_lgamma(x, prec2).mult(1, prec), 1]
+      else
+        # TODO: avoid infinity
         gamma = x.frac.zero? ? _integer_factorial(x.to_i - 1, prec2) : _gamma_lagrange(x, prec2)
         [BigMath.log(gamma, prec), 1]
-      else
-        a, sum = _gamma_spouge_sum_part(x, prec2)
-        log_gamma = BigMath.log(sum, prec2).add((x - 0.5).mult(BigMath.log(x.add(a - 1, prec2), prec2), prec2) + 1 - x, prec)
-        [log_gamma, 1]
       end
     end
   end
@@ -1021,48 +1018,6 @@ module BigMath
       break if d.exponent < y.exponent - prec
     end
     y
-  end
-
-
-  # Returns sum part: sqrt(2*pi) and c[k]/(x+k) terms of Spouge's approximation
-  private_class_method def _gamma_spouge_sum_part(x, prec) # :nodoc:
-    x -= 1
-    # Spouge's approximation
-    # x! = (x + a)**(x + 0.5) * exp(-x - a) * (sqrt(2 * pi)  + (1..a - 1).sum{|k| c[k] / (x + k) } + epsilon)
-    # where c[k] = (-1)**k * (a - k)**(k - 0.5) * exp(a - k) / (k - 1)!
-    # and epsilon is bounded by a**(-0.5) * (2 * pi) ** (-a - 0.5)
-
-    # Estimate required a for given precision
-    a = (prec / Math.log10(2 * Math::PI)).ceil
-
-    # Calculate exponent of c[k] in low precision to estimate required precision
-    low_prec = 16
-    log10f = Math.log(10)
-    x_low_prec = x.mult(1, low_prec)
-    loggamma_k = 0
-    ck_exponents = (1..a-1).map do |k|
-      loggamma_k += Math.log10(k - 1) if k > 1
-      -loggamma_k - k / log10f + (k - 0.5) * Math.log10(a - k) - BigDecimal::Internal.float_log(x_low_prec.add(k, low_prec)) / log10f
-    end
-
-    # Estimate exponent of sum by Stirling's approximation
-    approx_sum_exponent = x < 1 ? -Math.log10(a) / 2 : Math.log10(2 * Math::PI) / 2 + x_low_prec.add(0.5, low_prec) * Math.log10(x_low_prec / x_low_prec.add(a, low_prec))
-
-    # Determine required precision of c[k]
-    prec2 = [ck_exponents.max.ceil - approx_sum_exponent.floor, 0].max + prec
-
-    einv = BigMath.exp(-1, prec2)
-    sum = (PI(prec) * 2).sqrt(prec).mult(BigMath.exp(-a, prec), prec)
-    y = BigDecimal(1)
-    (1..a - 1).each do |k|
-      # c[k] = (-1)**k * (a - k)**(k - 0.5) * exp(-k) / (k-1)! / (x + k)
-      y = y.div(1 - k, prec2) if k > 1
-      y = y.mult(einv, prec2)
-      z = y.mult(BigDecimal((a - k) ** k), prec2).div(BigDecimal(a - k).sqrt(prec2).mult(x.add(k, prec2), prec2), prec2)
-      # sum += c[k] / (x + k)
-      sum = sum.add(z, prec2)
-    end
-    [a, sum]
   end
 
   # Returns sin(pi * x), for gamma reflection formula calculation
