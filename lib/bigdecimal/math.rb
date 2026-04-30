@@ -762,7 +762,7 @@ module BigMath
     [prd, coef]
   end
 
-  private_class_method def _integer_factorial(n, prec, invsqrtpi = nil, fact_2prec = nil)
+  private_class_method def _integer_factorial(n, prec, invsqrtpi = nil)
     # Simple case
     if n <= 50 * prec
       numbers = (1..n).map {|i| BigDecimal(i) }
@@ -774,15 +774,21 @@ module BigMath
     #   factorial(n) = factorial(n/2)*factorial((n-1)/2)*2**n/sqrt(pi)
     # factorial(b+0.5) can be calculated from factorial(b) with _gamma_lagrange_n_plus_half in quasi-linear time
     invsqrtpi ||= BigDecimal(1).div(PI(prec).sqrt(prec), prec)
-    fact_2prec ||= _integer_factorial(2 * prec, prec)
     b = (n + 1) / 2
-    l = prec
-    fact_b_minus_l = _integer_factorial(b - l, prec, invsqrtpi, fact_2prec)
+    l = _gamma_lagrange_l(b, prec)
+    fact_2l = _integer_factorial(2 * l, prec)
+    fact_b_minus_l = _integer_factorial(b - l, prec, invsqrtpi)
     nums = (b - l + 1..n / 2).map {|i| BigDecimal(i) }
     nums = nums.each_slice(2).map {|a, b| b ? a.mult(b, prec) : a } while nums.size > 1
     fact_fix = nums.first.mult(fact_b_minus_l, prec)
-    fact_half = _gamma_lagrange_n_plus_half(b, b, l, fact_b_minus_l, fact_2prec, prec)
+    fact_half = _gamma_lagrange_n_plus_half(b, b, l, fact_b_minus_l, fact_2l, prec)
     fact_fix.mult(fact_half, prec).mult(BigDecimal(2).power(n, prec), prec).mult(invsqrtpi, prec)
+  end
+
+  private_class_method def _gamma_lagrange_l(b, prec)
+    l = prec
+    2.times { l = prec / Math.log10(2 * Math::E * b / l) }
+    l.ceil + 10
   end
 
   private_class_method def _gamma_lagrange_n_plus_half(n, b, l, fact_b_minus_l, fact_2l, prec) # :nodoc:
@@ -837,7 +843,7 @@ module BigMath
     shift = x < 2 * prec ? 2 * prec - x.floor : 0
     x += shift
     b = x.round
-    l = prec
+    l = _gamma_lagrange_l(b, prec)
     factorial = _integer_factorial(b - l, prec)
     x = BigDecimal(x) - 1
 
