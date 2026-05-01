@@ -735,9 +735,17 @@ module BigMath
       pi = PI(prec2)
       sin = _sinpix(x, pi, prec2)
       pi.div(gamma(1 - x, prec2).mult(sin, prec2), prec)
+    elsif x.frac.zero?
+      _integer_factorial(x.to_i - 1, prec2).mult(1, prec)
     else
-      gamma = x.frac.zero? ? _integer_factorial(x.to_i - 1, prec2) : _gamma_lagrange(x, prec2)
-      gamma.mult(1, prec)
+      base, large_factorial, small_factorial = _gamma_lagrange(x, prec2)
+      base.mult(
+        _mult_range(1..small_factorial, prec2),
+        prec2
+      ).mult(
+        _integer_factorial(large_factorial, prec2),
+        prec
+      )
     end
   end
 
@@ -798,7 +806,6 @@ module BigMath
 
   def _integer_factorial_parameter(n, prec)
     base_power_part, factorial_power_part, exp2, expsqrtpi = _integer_factorial_recursive(n, prec)
-    ans = BigDecimal(1)
     fact_x = 1
     fact_y = BigDecimal(1)
     factorial_power_part.each_with_index do |factorial, index|
@@ -899,14 +906,7 @@ module BigMath
     x += shift
     b = x.round
     l = _gamma_lagrange_l(b, prec)
-    factorial = _integer_factorial(b - l, prec)
     x = BigDecimal(x) - 1
-
-    # c0 represents the common large factorial part factored out from the weights
-    # to avoid computing massive numbers in every term.
-    c0s = (1..2*l).to_a
-    c0s = c0s.each_slice(2).map {|a, b| b ? BigDecimal(a).mult(b, prec) : BigDecimal(a) } while c0s.size != 1
-    c0 = c0s.first.mult(factorial, prec)
 
     # --- Reference: Naive interpolation logic ---
     # Optimize this calculation for full-digit-x case and small-digit-x case.
@@ -992,7 +992,7 @@ module BigMath
     end
 
     # Reconstruct Gamma(x_original) by reversing the scaling and applying shift formula
-    BigDecimal(b).power(x - (b - l), prec).div(prod.mult(sum, prec), prec).mult(c0, prec)
+    [BigDecimal(b).power(x - (b - l), prec).div(prod.mult(sum, prec), prec), b - l, 2 * l]
   end
 
   # call-seq:
@@ -1041,11 +1041,20 @@ module BigMath
       prec2 += [-diff1_exponent, -diff2_exponent, 0].max
 
       if method == :bernoulli || (method != :lagrange && (x.exponent > Integer.sqrt(prec / 40) + 10))
+        p [:bernoulli, x.exponent, Integer.sqrt(prec / 40) + 10]
         [bn_lgamma(x, prec2).mult(1, prec), 1]
+      elsif x.frac.zero?
+        [_integer_factorial_log(x.to_i - 1, prec2).mult(1, prec), 1]
       else
-        # TODO: avoid infinity
-        gamma = x.frac.zero? ? _integer_factorial(x.to_i - 1, prec2) : _gamma_lagrange(x, prec2)
-        [BigMath.log(gamma, prec), 1]
+        base, large_factorial, small_factorial = _gamma_lagrange(x, prec2)
+        lgamma = log(base, prec2).add(
+          log(_mult_range(1..small_factorial, prec2), prec2),
+          prec2
+        ).add(
+          _integer_factorial_log(large_factorial, prec2),
+          prec
+        )
+        [lgamma, 1]
       end
     end
   end
