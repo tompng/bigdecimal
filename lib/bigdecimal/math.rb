@@ -850,7 +850,7 @@ module BigMath
     l = _gamma_lagrange_l(b, prec)
     prods = ((b-l)..(b+l)).map {|i| 2 * n - 2 * i - 1 }
     prods = prods.each_slice(2).map {|a, b| b ? a * b : a } while prods.size != 1
-    prod = BigDecimal(prods.first >> (2 * l + 1))
+    prod = BigDecimal(prods.first).mult(BigDecimal(0.5).power(2 * l + 1, prec), prec)
 
     # State represents: [Base_Denominator, Numerator, Denominator_Multiplier]
     fractions = (b - l + 1..b + l).map do |i|
@@ -864,8 +864,8 @@ module BigMath
         v0 = a[0] * b[2] + a[1] * b[0]
         v1 = a[1] * b[1]
         v2 = a[2] * b[2]
-        if v2.bit_length > prec * 4
-          s = v2.bit_length - prec * 4
+        s = v2.bit_length - prec * 10 / 3 # 10 / 3 = log2(10) + safety margin
+        if s > 0
           v0 >>= s
           v1 >>= s
           v2 >>= s
@@ -875,9 +875,6 @@ module BigMath
     end
     fraction = fractions.first
     sum = BigDecimal((fraction[0] + fraction[1]) * 2).div(fraction[2] * (2 * (n  - b + l) - 1), prec)
-    
-    # ans = BigDecimal(b).power(n - b + l, prec).div(BigDecimal(b).sqrt(prec), prec).div(sum.mult(prod, prec), prec).mult(base, prec)
-    # ans
 
     [
       BigDecimal(b).power(n - b + l, prec).div(BigDecimal(b).sqrt(prec).mult(sum.mult(prod, prec), prec), prec),
@@ -1041,7 +1038,6 @@ module BigMath
       prec2 += [-diff1_exponent, -diff2_exponent, 0].max
 
       if method == :bernoulli || (method != :lagrange && (x.exponent > Integer.sqrt(prec / 40) + 10))
-        p [:bernoulli, x.exponent, Integer.sqrt(prec / 40) + 10]
         [bn_lgamma(x, prec2).mult(1, prec), 1]
       elsif x.frac.zero?
         [_integer_factorial_log(x.to_i - 1, prec2).mult(1, prec), 1]
