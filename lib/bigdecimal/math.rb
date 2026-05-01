@@ -762,27 +762,72 @@ module BigMath
     [prd, coef]
   end
 
-  private_class_method def _integer_factorial(n, prec, invsqrtpi = nil)
-    # Simple case
-    if n <= 50 * prec
-      numbers = (1..n).map {|i| BigDecimal(i) }
-      numbers = numbers.each_slice(2).map {|a, b| b ? a.mult(b, prec) : a } while numbers.size > 1
-      return numbers.first || BigDecimal(1)
+  private_class_method def _mult_range(range, prec)
+    numbers = range.map {|i| BigDecimal(i) }
+    numbers = numbers.each_slice(2).map {|a, b| b ? a.mult(b, prec) : a } while numbers.size > 1
+    return numbers.first || BigDecimal(1)
+  end
+
+  def _integer_factorial(n, prec)
+    power_part, exp2, expsqrtpi = _integer_factorial_parameter(n, prec)
+    ans = BigDecimal(2).power(exp2, prec)
+    power_part.each_with_index do |base, index|
+      ans = ans.mult(base.power(1 << index, prec), prec)
+    end
+    if expsqrtpi != 0
+      pi = BigMath::PI(prec)
+      pipow = pi.power(expsqrtpi / 2, prec)
+      pipow = pipow.mult(pi.sqrt(prec), prec) if expsqrtpi.odd?
+      ans = ans.div(pipow, prec)
+    end
+    ans
+  end
+
+  def _integer_factorial_log(n, prec)
+    power_part, exp2, expsqrtpi = _integer_factorial_parameter(n, prec)
+    ans = log(2, prec) * exp2
+    power_part.each_with_index do |base, index|
+      ans = ans.add(log(base, prec) * (1 << index), prec)
+    end
+    if expsqrtpi != 0
+      pi = BigMath::PI(prec)
+      ans = ans.sub(log(pi, prec) * (BigDecimal(expsqrtpi) / 2), prec)
+    end
+    ans
+  end
+
+  def _integer_factorial_parameter(n, prec)
+    base_power_part, factorial_power_part, exp2, expsqrtpi = _integer_factorial_recursive(n, prec)
+    ans = BigDecimal(1)
+    fact_x = 1
+    fact_y = BigDecimal(1)
+    factorial_power_part.each_with_index do |factorial, index|
+      fact_y = fact_y.mult(_mult_range(fact_x + 1..factorial, prec), prec)
+      fact_x = factorial
+      base_power_part[index] = base_power_part[index].mult(fact_y, prec)
+    end
+
+    [base_power_part, exp2, expsqrtpi]
+  end
+
+  # Returns [base_power_part, factorial_power_part, exp2, expsqrtpi] that can produce factorial(n) as:
+  # factorial(n) = prod { base_power_part[i]**(1<<i) } * prod { factorial(factorial_power_part[i])**(1<<i) } * 2**exp2 / sqrt(pi)**(expsqrtpi)
+  def _integer_factorial_recursive(n, prec)
+    if n < 4 * prec
+      return [[_mult_range(1..n, prec)], [], 0, 0]
     end
 
     # Use Legendre duplication formula to calculate double factorials:
     #   factorial(n) = factorial(n/2)*factorial((n-1)/2)*2**n/sqrt(pi)
-    # factorial(b+0.5) can be calculated from factorial(b) with _gamma_lagrange_n_plus_half in quasi-linear time
-    invsqrtpi ||= BigDecimal(1).div(PI(prec).sqrt(prec), prec)
-    b = (n + 1) / 2
-    l = _gamma_lagrange_l(b, prec)
-    fact_2l = _integer_factorial(2 * l, prec)
-    fact_b_minus_l = _integer_factorial(b - l, prec, invsqrtpi)
-    nums = (b - l + 1..n / 2).map {|i| BigDecimal(i) }
-    nums = nums.each_slice(2).map {|a, b| b ? a.mult(b, prec) : a } while nums.size > 1
-    fact_fix = nums.first.mult(fact_b_minus_l, prec)
-    fact_half = _gamma_lagrange_n_plus_half(b, b, l, fact_b_minus_l, fact_2l, prec)
-    fact_fix.mult(fact_half, prec).mult(BigDecimal(2).power(n, prec), prec).mult(invsqrtpi, prec)
+    base, large_factorial, small_factorial = _gamma_lagrange_n_plus_half((n + 1) / 2, prec)
+    base = base.mult(_mult_range(large_factorial + 1..n / 2, prec), prec)
+    base_power_part, factorial_power_part, exp2, expsqrtpi = _integer_factorial_recursive(large_factorial, prec)
+    [
+      [base] + base_power_part,
+      [small_factorial] + factorial_power_part,
+      exp2 * 2 + n,
+      expsqrtpi * 2 + 1
+    ]
   end
 
   private_class_method def _gamma_lagrange_l(b, prec)
@@ -791,8 +836,11 @@ module BigMath
     l.ceil + 10
   end
 
-  private_class_method def _gamma_lagrange_n_plus_half(n, b, l, fact_b_minus_l, fact_2l, prec) # :nodoc:
-    base = fact_b_minus_l.mult(fact_2l, prec)
+  # Returns [base, large_factorial, small_factorial] that can produce gamma(n + 0.5) as:
+  #   gamma(n + 0.5) = base * large_factorial! * small_factorial!
+  private_class_method def _gamma_lagrange_n_plus_half(n, prec) # :nodoc:
+    b = n
+    l = _gamma_lagrange_l(b, prec)
     prods = ((b-l)..(b+l)).map {|i| 2 * n - 2 * i - 1 }
     prods = prods.each_slice(2).map {|a, b| b ? a * b : a } while prods.size != 1
     prod = BigDecimal(prods.first >> (2 * l + 1))
@@ -820,8 +868,15 @@ module BigMath
     end
     fraction = fractions.first
     sum = BigDecimal((fraction[0] + fraction[1]) * 2).div(fraction[2] * (2 * (n  - b + l) - 1), prec)
-    ans = BigDecimal(b).power(n - b + l, prec).div(BigDecimal(b).sqrt(prec), prec).div(sum.mult(prod, prec), prec).mult(base, prec)
-    ans
+    
+    # ans = BigDecimal(b).power(n - b + l, prec).div(BigDecimal(b).sqrt(prec), prec).div(sum.mult(prod, prec), prec).mult(base, prec)
+    # ans
+
+    [
+      BigDecimal(b).power(n - b + l, prec).div(BigDecimal(b).sqrt(prec).mult(sum.mult(prod, prec), prec), prec),
+      b - l, # large factorial part
+      2 * l # small factorial part
+    ]
   end
 
   # Calculate approximate gamma by Lagrange interpolation of f(x) = b**x / x!
