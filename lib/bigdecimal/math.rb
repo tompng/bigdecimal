@@ -776,7 +776,7 @@ module BigMath
     return numbers.first || BigDecimal(1)
   end
 
-  def _integer_factorial(n, prec)
+  private_class_method def _integer_factorial(n, prec)
     power_part, exp2, expsqrtpi = _integer_factorial_parameter(n, prec)
     ans = BigDecimal(2).power(exp2, prec)
     power_part.each_with_index do |base, index|
@@ -791,7 +791,7 @@ module BigMath
     ans
   end
 
-  def _integer_factorial_log(n, prec)
+  private_class_method def _integer_factorial_log(n, prec)
     power_part, exp2, expsqrtpi = _integer_factorial_parameter(n, prec)
     ans = log(2, prec) * exp2
     power_part.each_with_index do |base, index|
@@ -804,7 +804,7 @@ module BigMath
     ans
   end
 
-  def _integer_factorial_parameter(n, prec)
+  private_class_method def _integer_factorial_parameter(n, prec)
     base_power_part, factorial_power_part, exp2, expsqrtpi = _integer_factorial_recursive(n, prec)
     fact_x = 1
     fact_y = BigDecimal(1)
@@ -819,7 +819,7 @@ module BigMath
 
   # Returns [base_power_part, factorial_power_part, exp2, expsqrtpi] that can produce factorial(n) as:
   # factorial(n) = prod { base_power_part[i]**(1<<i) } * prod { factorial(factorial_power_part[i])**(1<<i) } * 2**exp2 / sqrt(pi)**(expsqrtpi)
-  def _integer_factorial_recursive(n, prec)
+  private_class_method def _integer_factorial_recursive(n, prec)
     if n < 4 * prec
       return [[_mult_range(1..n, prec)], [], 0, 0]
     end
@@ -827,6 +827,7 @@ module BigMath
     # Use Legendre duplication formula to calculate double factorials:
     #   factorial(n) = factorial(n/2)*factorial((n-1)/2)*2**n/sqrt(pi)
     base, large_factorial, small_factorial = _gamma_lagrange_n_plus_half((n + 1) / 2, prec)
+
     base = base.mult(_mult_range(large_factorial + 1..n / 2, prec), prec)
     base_power_part, factorial_power_part, exp2, expsqrtpi = _integer_factorial_recursive(large_factorial, prec)
     [
@@ -837,50 +838,11 @@ module BigMath
     ]
   end
 
+  # Estimate required l for Lagrange interpolation to achieve the given precision.
   private_class_method def _gamma_lagrange_l(b, prec)
     l = prec
     2.times { l = prec / Math.log10(2 * Math::E * b / l) }
     l.ceil + 10
-  end
-
-  # Returns [base, large_factorial, small_factorial] that can produce gamma(n + 0.5) as:
-  #   gamma(n + 0.5) = base * large_factorial! * small_factorial!
-  private_class_method def _gamma_lagrange_n_plus_half(n, prec) # :nodoc:
-    b = n
-    l = _gamma_lagrange_l(b, prec)
-    prods = ((b-l)..(b+l)).map {|i| 2 * n - 2 * i - 1 }
-    prods = prods.each_slice(2).map {|a, b| b ? a * b : a } while prods.size != 1
-    prod = BigDecimal(prods.first).mult(BigDecimal(0.5).power(2 * l + 1, prec), prec)
-
-    # State represents: [Base_Denominator, Numerator, Denominator_Multiplier]
-    fractions = (b - l + 1..b + l).map do |i|
-      denominator = (2 * n - 1 - 2 * i) * ((i - b + l) * i)
-      numerator = (2 * n + 1 - 2 * i) * (-b * (b + l - i + 1))
-      [denominator, numerator, denominator]
-    end
-    while fractions.size > 1
-      fractions = fractions.each_slice(2).map do |a, b|
-        b ||= [1, 0, 1]
-        v0 = a[0] * b[2] + a[1] * b[0]
-        v1 = a[1] * b[1]
-        v2 = a[2] * b[2]
-        s = v2.bit_length - prec * 10 / 3 # 10 / 3 = log2(10) + safety margin
-        if s > 0
-          v0 >>= s
-          v1 >>= s
-          v2 >>= s
-        end
-        [v0, v1, v2]
-      end
-    end
-    fraction = fractions.first
-    sum = BigDecimal((fraction[0] + fraction[1]) * 2).div(fraction[2] * (2 * (n  - b + l) - 1), prec)
-
-    [
-      BigDecimal(b).power(n - b + l, prec).div(BigDecimal(b).sqrt(prec).mult(sum.mult(prod, prec), prec), prec),
-      b - l, # large factorial part
-      2 * l # small factorial part
-    ]
   end
 
   # Calculate approximate gamma by Lagrange interpolation of f(x) = b**x / x!
@@ -897,7 +859,6 @@ module BigMath
   # Estimated time complexity:
   # - O(N * log^3 N) for small-digit/rational x (Binary Splitting)
   # - O(N^2) for full-digit x (Baby-step Giant-step)
-  # Precondition: 0 < x < const * (prec / prec.bit_length)**2
   private_class_method def _gamma_lagrange(x, prec) # :nodoc:
     shift = x < 2 * prec ? 2 * prec - x.floor : 0
     x += shift
@@ -992,6 +953,45 @@ module BigMath
     [BigDecimal(b).power(x - (b - l), prec).div(prod.mult(sum, prec), prec), b - l, 2 * l]
   end
 
+  # Specialized version of _gamma_lagrange for n + 0.5 (n is an integer) and n > 2 * prec
+  private_class_method def _gamma_lagrange_n_plus_half(n, prec) # :nodoc:
+    b = n
+    l = _gamma_lagrange_l(b, prec)
+    prods = ((b-l)..(b+l)).map {|i| 2 * n - 2 * i - 1 }
+    prods = prods.each_slice(2).map {|a, b| b ? a * b : a } while prods.size != 1
+    prod = BigDecimal(prods.first).mult(BigDecimal(0.5).power(2 * l + 1, prec), prec)
+
+    # State represents: [Base_Denominator, Numerator, Denominator_Multiplier]
+    fractions = (b - l + 1..b + l).map do |i|
+      denominator = (2 * n - 1 - 2 * i) * ((i - b + l) * i)
+      numerator = (2 * n + 1 - 2 * i) * (-b * (b + l - i + 1))
+      [denominator, numerator, denominator]
+    end
+    while fractions.size > 1
+      fractions = fractions.each_slice(2).map do |a, b|
+        b ||= [1, 0, 1]
+        v0 = a[0] * b[2] + a[1] * b[0]
+        v1 = a[1] * b[1]
+        v2 = a[2] * b[2]
+        s = v2.bit_length - prec * 10 / 3 # 10 / 3 = log2(10) + safety margin
+        if s > 0
+          v0 >>= s
+          v1 >>= s
+          v2 >>= s
+        end
+        [v0, v1, v2]
+      end
+    end
+    fraction = fractions.first
+    sum = BigDecimal((fraction[0] + fraction[1]) * 2).div(fraction[2] * (2 * (n  - b + l) - 1), prec)
+
+    [
+      BigDecimal(b).power(n - b + l, prec).div(BigDecimal(b).sqrt(prec).mult(sum.mult(prod, prec), prec), prec),
+      b - l, # large factorial part
+      2 * l # small factorial part
+    ]
+  end
+
   # call-seq:
   #   BigMath.lgamma(decimal, numeric)    -> [BigDecimal, Integer]
   #
@@ -1001,7 +1001,7 @@ module BigMath
   #   BigMath.lgamma(BigDecimal('0.5'), 32)
   #   #=> [0.57236494292470008707171367567653e0, 1]
   #
-  def lgamma(x, prec, method: nil)
+  def lgamma(x, prec)
     prec = BigDecimal::Internal.coerce_validate_prec(prec, :lgamma)
     x = BigDecimal::Internal.coerce_to_bigdecimal(x, prec, :lgamma)
     prec2 = prec + BigDecimal::Internal::EXTRA_PREC
@@ -1020,8 +1020,8 @@ module BigMath
       end
     else
       # if x is close to 1 or 2, increase precision to reduce loss of significance
-      diff1_exponent = (x - 1).exponent
-      diff2_exponent = (x - 2).exponent
+      diff1_exponent = x < 3 ? (x - 1).exponent : 0
+      diff2_exponent = x < 3 ? (x - 2).exponent : 0
       extremely_near_one = diff1_exponent < -prec2
       extremely_near_two = diff2_exponent < -prec2
 
@@ -1037,8 +1037,8 @@ module BigMath
 
       prec2 += [-diff1_exponent, -diff2_exponent, 0].max
 
-      if method == :bernoulli || (method != :lagrange && (x.exponent > Integer.sqrt(prec / 40) + 10))
-        [bn_lgamma(x, prec2).mult(1, prec), 1]
+      if x > prec2 && x.exponent > Integer.sqrt(prec2) / 6
+        [_lgamma_stirling(x, prec2).mult(1, prec), 1]
       elsif x.frac.zero?
         [_integer_factorial_log(x.to_i - 1, prec2).mult(1, prec), 1]
       else
@@ -1055,7 +1055,9 @@ module BigMath
     end
   end
 
-  def bn(n, bns, prec)
+  # Calculates bernoulli number.
+  # bns: calculated bernoulli numbers for memoization
+  private_class_method def _bernoulli(n, bns, prec) # :nodoc:
     return bns[0] ||= BigDecimal(1) if n == 0
     return bns[1] ||= BigDecimal(-0.5) if n == 1
     return bns[n] ||= BigDecimal(0) if n.odd?
@@ -1063,23 +1065,24 @@ module BigMath
       comb = 1
       sum = BigDecimal(0)
       n.times.each do |i|
-        c = comb
+        sum = sum.add(comb * _bernoulli(i, bns, prec), prec)
         comb = comb * (n - i + 1) / (i + 1)
-        sum = sum.add(c * bn(i, bns, prec), prec)
       end
       sum.div(-n - 1, prec)
     )
   end
 
-  def bn_lgamma(x, prec)
+  # Stirling's approximation with Bernoulli numbers for lgamma when x is large.
+  # Precondition: x > prec * ln(10)/2pi
+  private_class_method def _lgamma_stirling(x, prec) # :nodoc:
     x = BigDecimal(x)
-    y = x * BigMath.log(x, prec) - x + BigMath.log(2 * BigMath::PI(prec).div(x, prec), prec)/2
+    y = (x * (BigMath.log(x, prec) - 1)).add(BigMath.log(2 * BigMath::PI(prec).div(x, prec), prec) / 2, prec)
     bns = []
     xn = x
     x2 = x.mult(x, prec)
     (1..).each do |k|
       xn = xn.mult(x2, prec) if k != 1
-      d = bn(2*k, bns, prec).div(xn, prec).div(2*k*(2*k-1), prec)
+      d = _bernoulli(2 * k, bns, prec).div(xn, prec).div(2*k*(2*k-1), prec)
       y = y.add(d, prec)
       break if d.exponent < y.exponent - prec
     end
