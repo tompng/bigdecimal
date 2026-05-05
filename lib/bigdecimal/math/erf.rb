@@ -1,0 +1,360 @@
+# frozen_string_literal: true
+require 'bigdecimal/math'
+
+module BigMath
+  # Bit-burst implementation of BigMath.erf and BigMath.erfc.
+  #
+  # Repeatedly applies Taylor expansion at points x0, x0+x1, x0+x1+x2, ... where each
+  # successive xi has roughly double the number of digits, evaluating each step with
+  # binary splitting. Total cost is quasi-linear in the precision.
+  #
+  # Both functions are reduced to one of two auxiliary functions, related to erf/erfc
+  # by a common scale factor 2*exp(-x**2)/sqrt(pi) (see erf_exp2_scale):
+  #   F(x) = erf(x)  * exp(x**2) * sqrt(pi) / 2
+  #   G(x) = erfc(x) * exp(x**2) * sqrt(pi) / 2
+  # F and G satisfy polynomial-coefficient linear ODEs, so their Taylor coefficients
+  # obey linear recurrences that binary splitting can evaluate efficiently.
+  #
+  # Strategy (after symmetry erf(-x) = -erf(x)):
+  #   x == 0        : erf = 0
+  #   0 < x <= 8    : erf via bit-burst Taylor of F at increasing points; erfc via 1 - erf
+  #   x > 8         : erfc via asymptotic series of G at a truncation x0, then bit-burst
+  #                   refinement using Taylor in 1/x around 1/x0, 1/(x0+x1), ...
+  #                   erf via 1 - erfc (no cancellation loss since erfc << 1 there).
+  #                   Fallback when the asymptotic series at x0 doesn't reach the
+  #                   requested precision (prec >> x**2): compute erf via bit-burst
+  #                   Taylor of F directly; derive erfc as 1 - erf with ~x**2/log(10)
+  #                   extra digits to absorb cancellation.
+  #   x > 5e9       : erf = 1, erfc underflows
+  module Erf # :nodoc:
+
+    # Calculates erf with given precision.
+    def self.erf(x, prec) # :nodoc:
+      prec = BigDecimal::Internal.coerce_validate_prec(prec, :erf)
+      x = BigDecimal::Internal.coerce_to_bigdecimal(x, prec, :erf)
+      return BigDecimal::Internal.nan_computation_result if x.nan?
+      return BigDecimal(x.infinite?) if x.infinite?
+      return BigDecimal(0) if x == 0
+      return -erf(-x, prec) if x < 0
+      return BigDecimal(1) if x > 5000000000 # erf(5000000000) > 1 - 1e-10000000000000000000
+
+      if x > 8
+        xf = x.to_f
+        log10_erfc = -xf ** 2 / Math.log(10) - Math.log10(xf * Math::PI ** 0.5)
+        erfc_prec = [prec + log10_erfc.ceil, 1].max
+        erfc = erfc_bit_burst(x, erfc_prec + BigDecimal::Internal::EXTRA_PREC)
+        return BigDecimal(1).sub(erfc, prec) if erfc
+      end
+
+      erf_bit_burst(x, prec + BigDecimal::Internal::EXTRA_PREC).mult(1, prec)
+    end
+
+    # Calculates erfc with given precision.
+    def self.erfc(x, prec) # :nodoc:
+      prec = BigDecimal::Internal.coerce_validate_prec(prec, :erfc)
+      x = BigDecimal::Internal.coerce_to_bigdecimal(x, prec, :erfc)
+      return BigDecimal::Internal.nan_computation_result if x.nan?
+      return BigDecimal(1 - x.infinite?) if x.infinite?
+      return BigDecimal(1).sub(erf(x, prec + BigDecimal::Internal::EXTRA_PREC), prec) if x < 0.5
+      return BigDecimal::Internal.underflow_computation_result if x > 5000000000 # erfc(5000000000) < 1e-10000000000000000000 (underflow)
+
+      if x > 8
+        y = erfc_bit_burst(x, prec + BigDecimal::Internal::EXTRA_PREC)
+        return y.mult(1, prec) if y
+      end
+
+      # erfc(x) = 1 - erf(x) < exp(-x**2)/x/sqrt(pi)
+      # Precision of erf(x) needs about log10(exp(-x**2)/x/sqrt(pi)) extra digits
+      log10 = 2.302585092994046
+      xf = x.to_f
+      high_prec = prec + BigDecimal::Internal::EXTRA_PREC + ((xf**2 + Math.log(xf) + Math.log(Math::PI)/2) / log10).ceil
+      BigDecimal(1).sub(erf_bit_burst(x, high_prec), prec)
+    end
+
+    # Calculates exp(-x**2)*sqrt(pi)/2/x with given precision.
+    # This is the scale factor of function used in erf and erfc calculation.
+    def self.erf_exp2_scale(x, prec) # :nodoc:
+      # exp(y) loses about log10(|y|) leading digits, so x*x needs ~2*log10(x) extra digits.
+      exp_prec = prec + [x.exponent, 0].max * 2
+      2 * BigMath.exp(-x.mult(x, exp_prec), prec).div(BigMath::PI(prec).sqrt(prec), prec)
+    end
+
+    # Calculates erf(x) using bit-burst algorithm.
+    def self.erf_bit_burst(x, prec) # :nodoc:
+      # Result is multiplied by exp(-x**2) at the end, so digits of x beyond prec - x**2/log(10) do not affect the result.
+      x = x.mult(1, [prec - (x.ceil**2 / Math.log(10)).floor, 1].max)
+
+      calculated_x = BigDecimal(0)
+      erf_exp2 = BigDecimal(0)
+      digits = 8
+      scale = erf_exp2_scale(x, prec)
+
+      until x.zero?
+        partial = x.truncate(digits)
+        digits *= 2
+        next if partial.zero?
+
+        erf_exp2 = erf_exp2_binary_splitting(partial, calculated_x, erf_exp2, prec)
+        calculated_x += partial
+        x -= partial
+      end
+      erf_exp2.mult(scale, prec)
+    end
+
+    # Calculates erfc(x) using bit-burst algorithm.
+    #
+    # Unlike erf_bit_burst (which starts from x0 = 0 where F(0) = 0 is known), here
+    # we take a truncation x0 = x.truncate(digits) coarse enough that G's asymptotic
+    # series at x0 converges to the requested precision, and refine successively to
+    # G(x0+x1), G(x0+x1+x2), ... via Taylor in 1/x around 1/x0, 1/(x0+x1), ...
+    # (see erfc_exp2_inv_inv_binary_splitting for the inverse-variable trick).
+    # Returns nil when the asymptotic series at x0 cannot reach the requested precision.
+    def self.erfc_bit_burst(x, prec) # :nodoc:
+      # Initial split granularity (heuristic minimum to avoid splitting overhead).
+      digits = (x.exponent + 1) * 40
+
+      calculated_x = x.truncate(digits)
+      f = erfc_exp2_asymptotic_binary_splitting(calculated_x, prec)
+      return unless f
+
+      scale = erf_exp2_scale(x, prec)
+      x -= calculated_x
+
+      until x.zero?
+        digits *= 2
+        partial = x.truncate(digits)
+        next if partial.zero?
+
+        f = erfc_exp2_inv_inv_binary_splitting(partial, calculated_x, f, prec)
+        calculated_x += partial
+        x -= partial
+      end
+      f.mult(scale, prec)
+    end
+
+    # Matrix multiplication. m1 and m2 are size*size length array that represents size*size matrix
+    def self.matrix_mult(m1, m2, size, prec) # :nodoc:
+      (size * size).times.map do |i|
+        size.times.map do |k|
+          m1[i / size * size + k].mult(m2[size * k + i % size], prec)
+        end.reduce {|a, b| a.add(b, prec) }
+      end
+    end
+
+    # Matrix/Vector weighted sum
+    def self.array_weighted_sum(m1, w1, m2, w2, prec) # :nodoc:
+      m1.zip(m2).map {|v1, v2| (v1 * w1).add(v2 * w2, prec) }
+    end
+
+    # Calculates Taylor expansion of erf(x+a)*exp((x+a)**2)*sqrt(pi)/2 with binary splitting method.
+    def self.erf_exp2_binary_splitting(x, a, f_a, prec) # :nodoc:
+      # Let f(x+a) = erf(x+a)*exp((x+a)**2)*sqrt(pi)/2
+      #            = c0 + c1*x + c2*x**2 + c3*x**3 + c4*x**4 + ...
+      # f'(x+a) = 1+2*(x+a)*f(x+a)
+      # f'(x+a) = c1 + 2*c2*x + 3*c3*x**2 + 4*c4*x**3 + 5*c5*x**4 + ...
+      #         = 1+2*(x+a)*(c0 + c1*x + c2*x**2 + c3*x**3 + c4*x**4 + ...)
+      # therefore,
+      # c0 = f(a)
+      # c1 = 2 * a * c0 + 1
+      # c2 = (2 * c0 + 2 * a * c1) / 2
+      # c3 = (2 * c1 + 2 * a * c2) / 3
+      # c4 = (2 * c2 + 2 * a * c3) / 4
+      #
+      # All coefficients are positive when a >= 0
+
+      # Find the smallest n where the n-th Taylor term |c_n * x^n| falls below the precision
+      # threshold, using a Stirling-based upper bound on |c_n|.
+      log10f = Math.log(10)
+      cexponent = Math.log10([2 * a, Math.sqrt(2)].max.to_f) + BigDecimal::Internal.float_log(x.abs) / log10f
+
+      steps = BigDecimal.save_exception_mode do
+        # x.to_f may underflow when x is very small (e.g. 1e-400)
+        BigDecimal.mode(BigDecimal::EXCEPTION_UNDERFLOW, false)
+        (2..).bsearch do |n|
+          x.to_f ** 2 < n && n * cexponent + Math.lgamma(n / 2)[0] / log10f + n * Math.log10(2) - Math.lgamma(n - 1)[0] / log10f < -prec + x.to_f**2 / log10f
+        end
+      end
+
+      if a == 0
+        # Simple calculation for special case
+        denominators = (steps / 2).times.map {|i| 2 * i + 3 }
+        return x.mult(1 + BigDecimal::Internal.taylor_sum_binary_splitting(2 * x * x, denominators, prec), prec)
+      end
+
+      # First, calculate a matrix that represents the sum of the Taylor series:
+      # SumMatrix = (((((...+I)x*M4+I)*x*M3+I)*M2*x+I)*M1*x+I)
+      # Where Mi is a 2x2 matrix that generates the next coefficients of Taylor series:
+      # Vector(c4, c5) = M4*M3*M2*M1*Vector(c0, c1)
+      # And then calculates:
+      # SumMatrix * Vector(c0, c1) = Vector(c0+c1*x+c2*x**2+..., _)
+      # In this binary splitting method, adjacent two operations are combined into one repeatedly.
+      # ((...) * x * A + B) / C is the form of each operation. A and B are 2x2 matrices, C is a scalar.
+      zero = BigDecimal(0)
+      two = BigDecimal(2)
+      two_a = two * a
+      operations = steps.times.map do |i|
+        n = BigDecimal(2 + i)
+        [[zero, n, two, two_a], [n, zero, zero, n], n]
+      end
+
+      while operations.size > 1
+        xpow = xpow ? xpow.mult(xpow, prec) : x.mult(1, prec)
+        operations = operations.each_slice(2).map do |op1, op2|
+          # Combine two operations into one:
+          # (((Remaining * x * A2 + B2) / C2) * x * A1 + B1) / C1
+          # ((Remaining * (x*x) * (A2*A1) + (x*B2*A1+B1*C2)) / (C1*C2)
+          # Therefore, combined operation can be represented as:
+          # Anext = A2 * A1
+          # Bnext = x * B2 * A1 + B1 * C2
+          # Cnext = C1 * C2
+          # xnext = x * x
+          a1, b1, c1 = op1
+          a2, b2, c2 = op2 || [[zero] * 4, [zero] * 4, BigDecimal(1)]
+          [
+            matrix_mult(a2, a1, 2, prec),
+            array_weighted_sum(matrix_mult(b2, a1, 2, prec), xpow, b1, c2, prec),
+            c1.mult(c2, prec),
+          ]
+        end
+      end
+      _, sum_matrix, denominator = operations.first
+      (sum_matrix[1] + f_a * (2 * a * sum_matrix[1] + sum_matrix[0])).div(denominator, prec)
+    end
+
+    # Calculates asymptotic expansion of erfc(x)*exp(x**2)*sqrt(pi)/2 with binary splitting method
+    def self.erfc_exp2_asymptotic_binary_splitting(x, prec) # :nodoc:
+      # Let f(x) = erfc(x)*sqrt(pi)*exp(x**2)/2
+      # f(x) satisfies the following differential equation:
+      # 2*x*f(x) = f'(x) + 1
+      # From the above equation, we can derive the following asymptotic expansion:
+      # f(x) = (0..kmax).sum { (-1)**k * (2*k)! / 4**k / k! / x**(2*k) } / x
+
+      # This asymptotic expansion does not converge.
+      # But if there is a k that satisfies (2*k)! / 4**k / k! / x**(2*k) < 10**(-prec),
+      # It is enough to calculate erfc within the given precision.
+      # Using Stirling's approximation, we can simplify this condition to:
+      # log(2)/2 + k*log(k) - k - 2*k*log(x) < -prec*log(10)
+      # and the left side is minimized when k = x**2.
+      xf = x.to_f
+      kmax = (1..(xf ** 2).floor).bsearch do |k|
+        Math.log(2) / 2 + k * Math.log(k) - k - 2 * k * Math.log(xf) < -prec * Math.log(10)
+      end
+      return unless kmax
+
+      # Convert asymptotic expansion to nested form:
+      # 1 + a/x + a*b/x/x + a*b*c/x/x/x + a*b*c/x/x/x*rest
+      # = 1 + (a/x) * (1 + (b/x) * (1 + (c/x) * (1 + rest)))
+      #
+      # And calculate it with binary splitting:
+      # (a1/d + b1/d * (a2/d + b2/d * (rest)))
+      # = ((a1*d+b1*a2)/(d*d) + b1*b2/(d*denominator) * (rest)))
+      denominator = x.mult(x, prec).mult(2, prec)
+      fractions = (1..kmax).map do |k|
+        [denominator, BigDecimal(1 - 2 * k)]
+      end
+      while fractions.size > 1
+        fractions = fractions.each_slice(2).map do |fraction1, fraction2|
+          a1, b1 = fraction1
+          a2, b2 = fraction2 || [BigDecimal(0), denominator]
+          [
+            a1.mult(denominator, prec).add(b1.mult(a2, prec), prec),
+            b1.mult(b2, prec),
+          ]
+        end
+        denominator = denominator.mult(denominator, prec)
+      end
+      # Plug rest = 1 into the merged form: the innermost "(1 + rest)" of the nested expansion
+      # evaluates to 1 at truncation (rest = 0).
+      sum = fractions[0][0].add(fractions[0][1], prec).div(denominator, prec)
+      sum.div(x, prec) / 2
+    end
+
+    # Calculates f(1/(a+x)) where f(x) = (sqrt(pi)/2) * exp(1/x**2) * erfc(1/x)
+    # Parameter f_inva is f(1/a)
+    def self.erfc_exp2_inv_inv_binary_splitting(x, a, f_inva, prec) # :nodoc:
+      return f_inva if x.zero?
+
+      # G(x) is small and well-behaved as a function of t = 1/x near infinity, but its
+      # direct Taylor expansion around finite a has rapidly growing coefficients.
+      # Instead, we work with f(t) := G(1/t), which admits a well-conditioned Taylor
+      # series around t = 1/a, and compute G(a+x) = f(1/(a+x)).
+      #
+      # Performs taylor expansion using f(1/(a+x)) = f(1/a - x/(a*(a+x)))
+
+      # f(x) satisfies the following differential equation:
+      # (1/a+w)**3*f'(1/a+w) + 2*f(1/a+w) = 1/a + w
+      # From the above equation, we can derive the following Taylor expansion of f around 1/a:
+      # Coefficients: f(1/a + w) = c0 + c1*w + c2*w**2 + c3*w**3 + ...
+      # Constraints:
+      #   (w**3 + 3*w**2/a + 3*w/a**2 + 1/a**3) * (c1 + 2*c2*w + 3*c3*w**2 + 4*c4*w**3 + ...)
+      #   + 2 * (c0 + c1*w + c2*w**2 + c3*w**3 + ...) = 1/a + w
+      # Recurrence relations:
+      #   c0 = f(1/a)
+      #   c1 = a**2 - 2*c0*a**3
+      #   c2 = (a**3 - 3*c1*a - 2*c1*a**3) / 2
+      #   c3 = -(3*c1*a**2 + 6*c2*a + 2*c2*a**3) / 3
+      #   c(n) = -((n-3)*c(n-3)*a**3 + 3*(n-2)*c(n-2)*a**2 + 3*(n-1)*c(n-1)*a + 2*c(n-1)*a**3) / n
+
+      aa = a.mult(a, prec)
+      aaa = aa.mult(a, prec)
+      c0 = f_inva
+      c1 = (aa - 2 * c0 * aaa).mult(1, prec)
+      c2 = (aaa - 3 * c1 * a - 2 * c1 * aaa).div(2, prec)
+
+      # Estimate the number of steps needed to achieve the required precision
+      low_prec = 16
+      w = x.div(a.mult(a + x, low_prec), low_prec)
+      wpow = w.mult(w, low_prec)
+      cm3, cm2, cm1 = [c0, c1, c2].map {|v| v.mult(1, low_prec) }
+      a_low, aa_low, aaa_low = [a, aa, aaa].map {|v| v.mult(1, low_prec) }
+      step = (3..).find do |n|
+        wpow = wpow.mult(w, low_prec)
+        cn = -((n - 3) * cm3 * aaa_low + 3 * aa_low * (n - 2) * cm2 + 3 * a_low * (n - 1) * cm1 + 2 * cm1 * aaa_low).div(n, low_prec)
+        cm3, cm2, cm1 = cm2, cm1, cn
+        cn.mult(wpow, low_prec).exponent < -prec
+      end
+
+      # Let M(n) be a 3x3 matrix that transforms (c(n-3),c(n-2),c(n-1)) to (c(n-2),c(n-1),c(n))
+      # Mn = | 0             1              0                    |
+      #      | 0             0              1                    |
+      #      | -(n-3)*aaa/n  -3*(n-2)*aa/n  (-2*aaa-3*(n-1)*a)/n |
+      # Vector(c(step),c(step+1),c(step+2)) = M(step+2)*...*M5*M4*M3 * Vector(c0,c1,c2)
+      # Vector(c0+c1*y/z+c2*(y/z)**2+..., _, _) = ((((... + I)*M5*y/z + I)*M4*y/z + I)*M3*y/z + I) * Vector(c0, c1, c2)
+      # Perform binary splitting on this nested parenthesized calculation by using the following formula:
+      # (((...)*A2*y/z + B2)/D2 * A1*y/z + B1)/D1 = (((...)*(A2*A1)*(y*y)/z + (B2*A1*y+z*D2*B1)) / (D1*D2*z)
+      # where An, Bn are matrices and Dn are scalars
+
+      zero = BigDecimal(0)
+      operations = (3..step + 2).map do |n|
+        bign = BigDecimal(n)
+        [
+          [
+            zero, bign, zero,
+            zero, zero, bign,
+            BigDecimal(-(n - 3) * aaa), -3 * (n - 2) * aa, -2 * aaa - 3 * (n - 1) * a
+          ],
+          [bign, zero, zero, zero, bign, zero, zero, zero, bign],
+          bign
+        ]
+      end
+
+      z = a.mult(a + x, prec)
+      while operations.size > 1
+        y = y ? y.mult(y, prec) : -x.mult(1, prec)
+        operations = operations.each_slice(2).map do |op1, op2|
+          a1, b1, d1 = op1
+          a2, b2, d2 = op2 || [[zero] * 9, [zero] * 9, BigDecimal(1)]
+          [
+            matrix_mult(a2, a1, 3, prec),
+            array_weighted_sum(matrix_mult(b2, a1, 3, prec), y, b1, d2.mult(z, prec), prec),
+            d1.mult(d2, prec).mult(z, prec),
+          ]
+        end
+      end
+      _, sum_matrix, denominator = operations[0]
+      (sum_matrix[0] * c0 + sum_matrix[1] * c1 + sum_matrix[2] * c2).div(denominator, prec)
+    end
+  end
+
+  private_constant :Erf
+end
