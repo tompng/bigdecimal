@@ -826,3 +826,4 @@ module BigMath
     exp(1, prec)
   end
 end
+require 'bigdecimal/math/erf'

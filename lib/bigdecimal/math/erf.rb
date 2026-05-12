@@ -73,16 +73,16 @@ module BigMath
 
     # Calculates exp(-x**2)*sqrt(pi)/2/x with given precision.
     # This is the scale factor of function used in erf and erfc calculation.
-    def self.erf_exp2_scale(x, prec) # :nodoc:
+    def self.erf_exp2_scale(x, prec, sqrtpi = nil) # :nodoc:
       # exp(y) loses about log10(|y|) leading digits, so x*x needs ~2*log10(x) extra digits.
       exp_prec = prec + [x.exponent, 0].max * 2
-      2 * BigMath.exp(-x.mult(x, exp_prec), prec).div(BigMath::PI(prec).sqrt(prec), prec)
+      2 * BigMath.exp(-x.mult(x, exp_prec), prec).div(sqrtpi || BigMath::PI(prec).sqrt(prec), prec)
     end
 
     # Calculates erf(x) using bit-burst algorithm.
     def self.erf_bit_burst(x, prec) # :nodoc:
-      # Result is multiplied by exp(-x**2) at the end, so digits of x beyond prec - x**2/log(10) do not affect the result.
-      x = x.mult(1, [prec - (x.ceil**2 / Math.log(10)).floor, 1].max)
+      # Result is multiplied by exp(-x**2) at the end, so digits of x beyond prec - 2*x/log(10) do not affect the result.
+      x = x.mult(1, [prec - (2 * x.ceil / Math.log(10)).floor, 1].max)
 
       calculated_x = BigDecimal(0)
       erf_exp2 = BigDecimal(0)
@@ -141,6 +141,126 @@ module BigMath
       end
     end
 
+    def self.erf_binary_splitting_diff(x, a, prec)
+      # Calculates erf(x + a) - erf(a) as:
+      # erf(x + a) - erf(a) = (2/sqrt(pi)) * exp(-a**2) * x * sum { c(i) * x**i }
+      # c(0) = 1
+      # c(1) = -a
+      # c(i) = -2 * (a * c(i - 1) / (i + 1) + c(i - 2) * (i - 1) / i / (i + 1))
+
+      # Estimate required number of terms by calculating c(i) with low precision
+      coefs = [BigDecimal(1), BigDecimal(-a)]
+      xn = BigDecimal(1)
+      low_prec = 10
+      x_low = x.mult(1, low_prec)
+      threshold = BigDecimal(1)._decimal_shift(-prec)
+      steps = (2..).find do |n|
+        prevprev, prev = coefs
+        xn = xn.mult(x_low, low_prec)
+        coefs = prev, (a * prev / (n + 1) + prevprev * (n - 1) / n / (n + 1)).mult(-2, low_prec)
+        coefs[0].mult(xn, low_prec).abs < threshold && coefs[1].mult(xn * x_low, low_prec).abs < threshold
+      end
+
+      # Let M(i) be a 2x2 matrix that generates the next coefficients vector (c(i-1), c(i))
+      # from the previous two coefficients (c(i-2), c(i-1)).
+      # M(i) = | 0,                1          |
+      #        | -2*(i-1)/i/(i+1), -2*a/(i+1) |
+      #
+
+      # First, calculate a matrix that represents the sum of the Taylor series:
+      # SumMatrix = ((((...+I)x*M4+I)*x*M3+I)*M2*x+I)
+      # Where Mi is a 2x2 matrix that generates the next coefficients of Taylor series:
+      # Vector(c4, c5) = M5*M4*M3*M2*Vector(c0, c1)
+      # And then calculates:
+      # SumMatrix * Vector(c0, c1) = Vector(c0+c1*x+c2*x**2+c3*x**3+..., _)
+      # In this binary splitting method, adjacent two operations are combined into one repeatedly.
+      # ((...) * x * A + B) / C is the form of each operation. A and B are 2x2 matrices, C is a scalar.
+
+      zero = BigDecimal(0)
+      operations = (2..steps + 2).map do |i|
+        d = BigDecimal(i * (i + 1))
+        [[zero, d, BigDecimal(-2 * (i - 1)), a * (-2 * i)], [d, zero, zero, d], d]
+      end
+
+      while operations.size > 1
+        xpow = xpow ? xpow.mult(xpow, prec) : x.mult(1, prec)
+        operations = operations.each_slice(2).map do |op1, op2|
+          # Combine two operations into one:
+          # (((Remaining * x * A2 + B2) / C2) * x * A1 + B1) / C1
+          # ((Remaining * (x*x) * (A2*A1) + (x*B2*A1+B1*C2)) / (C1*C2)
+          # Therefore, combined operation can be represented as:
+          # Anext = A2 * A1
+          # Bnext = x * B2 * A1 + B1 * C2
+          # Cnext = C1 * C2
+          # xnext = x * x
+          a1, b1, c1 = op1
+          a2, b2, c2 = op2 || [[zero] * 4, [zero] * 4, BigDecimal(1)]
+          [
+            matrix_mult(a2, a1, 2, prec),
+            array_weighted_sum(matrix_mult(b2, a1, 2, prec), xpow, b1, c2, prec),
+            c1.mult(c2, prec),
+          ]
+        end
+      end
+      _, sum_matrix, denominator = operations.first
+      sum = (sum_matrix[0] - a * sum_matrix[1]).div(denominator, prec)
+      # ((2/BigMath::PI(prec).sqrt(prec)) * BigMath.exp(-a**2, prec).mult(x, prec)).mult(sum, prec)
+      x.mult(sum, prec)
+    end
+
+    def self.erfc_bit_burst2(x, prec)
+      digits = 40
+
+      calculated_x = x.truncate(digits)
+      f = erfc_exp2_asymptotic_binary_splitting(calculated_x, prec)
+      return unless f
+      sqrtpi = BigMath::PI(prec).sqrt(prec)
+      f = f.mult(erf_exp2_scale(calculated_x, prec, sqrtpi), prec)
+      x -= calculated_x
+
+      diff = BigDecimal(0)
+      exp_scale = BigMath.exp(-calculated_x**2, prec)
+      until x.zero?
+        digits *= 2
+        partial = x.truncate(digits)
+        next if partial.zero?
+        d = erf_binary_splitting_diff(partial, calculated_x, prec)
+        diff = diff.add(d.mult(exp_scale, prec), prec)
+        exp_scale = exp_scale.mult(BigMath.exp(-calculated_x * partial * 2 - partial**2, prec), prec) unless x.zero?
+        calculated_x += partial
+        x -= partial
+      end
+      diff = diff.mult(BigDecimal(2).div(sqrtpi, prec), prec)
+      f.sub(diff, prec)
+    end
+
+    def self.erf_bit_burst2(x, prec)
+      # Result is multiplied by exp(-x**2) at the end, so digits of x beyond prec - 2*x/log(10) do not affect the result.
+      x = x.mult(1, [prec - (2 * x.ceil / Math.log(10)).floor, 10].max)
+
+      sqrtpi = BigMath::PI(prec).sqrt(prec)
+      digits = 8
+      calculated_x = x.truncate(digits)
+      f = erf_exp2_binary_splitting(calculated_x, BigDecimal(0), BigDecimal(0), prec)
+      f = f.mult(erf_exp2_scale(calculated_x, prec, sqrtpi), prec)
+      x -= calculated_x
+
+      exp_scale = BigMath.exp(-calculated_x**2, prec)
+      diff = BigDecimal(0)
+      until x.zero?
+        digits *= 2
+        partial = x.truncate(digits)
+        next if partial.zero?
+        d = erf_binary_splitting_diff(partial, calculated_x, prec)
+        diff = diff.add(d.mult(exp_scale, prec), prec)
+        exp_scale = exp_scale.mult(BigMath.exp(-calculated_x * partial * 2 - partial**2, prec), prec) unless x.zero?
+        calculated_x += partial
+        x -= partial
+      end
+      diff = diff.mult(BigDecimal(2).div(sqrtpi, prec), prec)
+      f.add(diff, prec)
+    end
+
     # Matrix/Vector weighted sum
     def self.array_weighted_sum(m1, w1, m2, w2, prec) # :nodoc:
       m1.zip(m2).map {|v1, v2| (v1 * w1).add(v2 * w2, prec) }
@@ -174,7 +294,6 @@ module BigMath
           x.to_f ** 2 < n && n * cexponent + Math.lgamma(n / 2)[0] / log10f + n * Math.log10(2) - Math.lgamma(n - 1)[0] / log10f < -prec + x.to_f**2 / log10f
         end
       end
-
       if a == 0
         # Simple calculation for special case
         denominators = (steps / 2).times.map {|i| 2 * i + 3 }
@@ -356,5 +475,5 @@ module BigMath
     end
   end
 
-  private_constant :Erf
+  # private_constant :Erf
 end
