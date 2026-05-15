@@ -101,37 +101,6 @@ module BigMath
       erf_exp2.mult(scale, prec)
     end
 
-    # Calculates erfc(x) using bit-burst algorithm.
-    #
-    # Unlike erf_bit_burst (which starts from x0 = 0 where F(0) = 0 is known), here
-    # we take a truncation x0 = x.truncate(digits) coarse enough that G's asymptotic
-    # series at x0 converges to the requested precision, and refine successively to
-    # G(x0+x1), G(x0+x1+x2), ... via Taylor in 1/x around 1/x0, 1/(x0+x1), ...
-    # (see erfc_exp2_inv_inv_binary_splitting for the inverse-variable trick).
-    # Returns nil when the asymptotic series at x0 cannot reach the requested precision.
-    def self.erfc_bit_burst(x, prec) # :nodoc:
-      # Initial split granularity (heuristic minimum to avoid splitting overhead).
-      digits = (x.exponent + 1) * 40
-
-      calculated_x = x.truncate(digits)
-      f = erfc_exp2_asymptotic_binary_splitting(calculated_x, prec)
-      return unless f
-
-      scale = erf_exp2_scale(x, prec)
-      x -= calculated_x
-
-      until x.zero?
-        digits *= 2
-        partial = x.truncate(digits)
-        next if partial.zero?
-
-        f = erfc_exp2_inv_inv_binary_splitting(partial, calculated_x, f, prec)
-        calculated_x += partial
-        x -= partial
-      end
-      f.mult(scale, prec)
-    end
-
     # Matrix multiplication. m1 and m2 are size*size length array that represents size*size matrix
     def self.matrix_mult(m1, m2, size, prec) # :nodoc:
       (size * size).times.map do |i|
@@ -208,7 +177,7 @@ module BigMath
       x.mult(sum, prec)
     end
 
-    def self.erfc_bit_burst2(x, prec)
+    def self.erfc_bit_burst(x, prec)
       digits = 40
 
       calculated_x = x.truncate(digits)
@@ -386,92 +355,6 @@ module BigMath
       # evaluates to 1 at truncation (rest = 0).
       sum = fractions[0][0].add(fractions[0][1], prec).div(denominator, prec)
       sum.div(x, prec) / 2
-    end
-
-    # Calculates f(1/(a+x)) where f(x) = (sqrt(pi)/2) * exp(1/x**2) * erfc(1/x)
-    # Parameter f_inva is f(1/a)
-    def self.erfc_exp2_inv_inv_binary_splitting(x, a, f_inva, prec) # :nodoc:
-      return f_inva if x.zero?
-
-      # G(x) is small and well-behaved as a function of t = 1/x near infinity, but its
-      # direct Taylor expansion around finite a has rapidly growing coefficients.
-      # Instead, we work with f(t) := G(1/t), which admits a well-conditioned Taylor
-      # series around t = 1/a, and compute G(a+x) = f(1/(a+x)).
-      #
-      # Performs taylor expansion using f(1/(a+x)) = f(1/a - x/(a*(a+x)))
-
-      # f(x) satisfies the following differential equation:
-      # (1/a+w)**3*f'(1/a+w) + 2*f(1/a+w) = 1/a + w
-      # From the above equation, we can derive the following Taylor expansion of f around 1/a:
-      # Coefficients: f(1/a + w) = c0 + c1*w + c2*w**2 + c3*w**3 + ...
-      # Constraints:
-      #   (w**3 + 3*w**2/a + 3*w/a**2 + 1/a**3) * (c1 + 2*c2*w + 3*c3*w**2 + 4*c4*w**3 + ...)
-      #   + 2 * (c0 + c1*w + c2*w**2 + c3*w**3 + ...) = 1/a + w
-      # Recurrence relations:
-      #   c0 = f(1/a)
-      #   c1 = a**2 - 2*c0*a**3
-      #   c2 = (a**3 - 3*c1*a - 2*c1*a**3) / 2
-      #   c3 = -(3*c1*a**2 + 6*c2*a + 2*c2*a**3) / 3
-      #   c(n) = -((n-3)*c(n-3)*a**3 + 3*(n-2)*c(n-2)*a**2 + 3*(n-1)*c(n-1)*a + 2*c(n-1)*a**3) / n
-
-      aa = a.mult(a, prec)
-      aaa = aa.mult(a, prec)
-      c0 = f_inva
-      c1 = (aa - 2 * c0 * aaa).mult(1, prec)
-      c2 = (aaa - 3 * c1 * a - 2 * c1 * aaa).div(2, prec)
-
-      # Estimate the number of steps needed to achieve the required precision
-      low_prec = 16
-      w = x.div(a.mult(a + x, low_prec), low_prec)
-      wpow = w.mult(w, low_prec)
-      cm3, cm2, cm1 = [c0, c1, c2].map {|v| v.mult(1, low_prec) }
-      a_low, aa_low, aaa_low = [a, aa, aaa].map {|v| v.mult(1, low_prec) }
-      step = (3..).find do |n|
-        wpow = wpow.mult(w, low_prec)
-        cn = -((n - 3) * cm3 * aaa_low + 3 * aa_low * (n - 2) * cm2 + 3 * a_low * (n - 1) * cm1 + 2 * cm1 * aaa_low).div(n, low_prec)
-        cm3, cm2, cm1 = cm2, cm1, cn
-        cn.mult(wpow, low_prec).exponent < -prec
-      end
-
-      # Let M(n) be a 3x3 matrix that transforms (c(n-3),c(n-2),c(n-1)) to (c(n-2),c(n-1),c(n))
-      # Mn = | 0             1              0                    |
-      #      | 0             0              1                    |
-      #      | -(n-3)*aaa/n  -3*(n-2)*aa/n  (-2*aaa-3*(n-1)*a)/n |
-      # Vector(c(step),c(step+1),c(step+2)) = M(step+2)*...*M5*M4*M3 * Vector(c0,c1,c2)
-      # Vector(c0+c1*y/z+c2*(y/z)**2+..., _, _) = ((((... + I)*M5*y/z + I)*M4*y/z + I)*M3*y/z + I) * Vector(c0, c1, c2)
-      # Perform binary splitting on this nested parenthesized calculation by using the following formula:
-      # (((...)*A2*y/z + B2)/D2 * A1*y/z + B1)/D1 = (((...)*(A2*A1)*(y*y)/z + (B2*A1*y+z*D2*B1)) / (D1*D2*z)
-      # where An, Bn are matrices and Dn are scalars
-
-      zero = BigDecimal(0)
-      operations = (3..step + 2).map do |n|
-        bign = BigDecimal(n)
-        [
-          [
-            zero, bign, zero,
-            zero, zero, bign,
-            BigDecimal(-(n - 3) * aaa), -3 * (n - 2) * aa, -2 * aaa - 3 * (n - 1) * a
-          ],
-          [bign, zero, zero, zero, bign, zero, zero, zero, bign],
-          bign
-        ]
-      end
-
-      z = a.mult(a + x, prec)
-      while operations.size > 1
-        y = y ? y.mult(y, prec) : -x.mult(1, prec)
-        operations = operations.each_slice(2).map do |op1, op2|
-          a1, b1, d1 = op1
-          a2, b2, d2 = op2 || [[zero] * 9, [zero] * 9, BigDecimal(1)]
-          [
-            matrix_mult(a2, a1, 3, prec),
-            array_weighted_sum(matrix_mult(b2, a1, 3, prec), y, b1, d2.mult(z, prec), prec),
-            d1.mult(d2, prec).mult(z, prec),
-          ]
-        end
-      end
-      _, sum_matrix, denominator = operations[0]
-      (sum_matrix[0] * c0 + sum_matrix[1] * c1 + sum_matrix[2] * c2).div(denominator, prec)
     end
   end
 
