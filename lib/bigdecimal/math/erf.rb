@@ -1,5 +1,4 @@
 # frozen_string_literal: true
-require 'bigdecimal/math'
 
 module BigMath
   # Bit-burst implementation of BigMath.erf and BigMath.erfc.
@@ -69,36 +68,6 @@ module BigMath
       xf = x.to_f
       high_prec = prec + BigDecimal::Internal::EXTRA_PREC + ((xf**2 + Math.log(xf) + Math.log(Math::PI)/2) / log10).ceil
       BigDecimal(1).sub(erf_bit_burst(x, high_prec), prec)
-    end
-
-    # Calculates exp(-x**2)*sqrt(pi)/2/x with given precision.
-    # This is the scale factor of function used in erf and erfc calculation.
-    def self.erf_exp2_scale(x, prec, sqrtpi = nil) # :nodoc:
-      # exp(y) loses about log10(|y|) leading digits, so x*x needs ~2*log10(x) extra digits.
-      exp_prec = prec + [x.exponent, 0].max * 2
-      2 * BigMath.exp(-x.mult(x, exp_prec), prec).div(sqrtpi || BigMath::PI(prec).sqrt(prec), prec)
-    end
-
-    # Calculates erf(x) using bit-burst algorithm.
-    def self.erf_bit_burst(x, prec) # :nodoc:
-      # Result is multiplied by exp(-x**2) at the end, so digits of x beyond prec - 2*x/log(10) do not affect the result.
-      x = x.mult(1, [prec - (2 * x.ceil / Math.log(10)).floor, 1].max)
-
-      calculated_x = BigDecimal(0)
-      erf_exp2 = BigDecimal(0)
-      digits = 8
-      scale = erf_exp2_scale(x, prec)
-
-      until x.zero?
-        partial = x.truncate(digits)
-        digits *= 2
-        next if partial.zero?
-
-        erf_exp2 = erf_exp2_binary_splitting(partial, calculated_x, erf_exp2, prec)
-        calculated_x += partial
-        x -= partial
-      end
-      erf_exp2.mult(scale, prec)
     end
 
     # Matrix multiplication. m1 and m2 are size*size length array that represents size*size matrix
@@ -178,56 +147,49 @@ module BigMath
     end
 
     def self.erfc_bit_burst(x, prec)
-      digits = 40
-
-      calculated_x = x.truncate(digits)
-      f = erfc_exp2_asymptotic_binary_splitting(calculated_x, prec)
-      return unless f
-      sqrtpi = BigMath::PI(prec).sqrt(prec)
-      f = f.mult(erf_exp2_scale(calculated_x, prec, sqrtpi), prec)
-      x -= calculated_x
-
-      diff = BigDecimal(0)
-      exp_scale = BigMath.exp(-calculated_x**2, prec)
-      until x.zero?
-        digits *= 2
-        partial = x.truncate(digits)
-        next if partial.zero?
-        d = erf_binary_splitting_diff(partial, calculated_x, prec)
-        diff = diff.add(d.mult(exp_scale, prec), prec)
-        exp_scale = exp_scale.mult(BigMath.exp(-calculated_x * partial * 2 - partial**2, prec), prec) unless x.zero?
-        calculated_x += partial
-        x -= partial
-      end
-      diff = diff.mult(BigDecimal(2).div(sqrtpi, prec), prec)
-      f.sub(diff, prec)
+      erf_erfc_bit_burst(x, prec, start_digits: 40, mode: :erfc)
     end
 
-    def self.erf_bit_burst2(x, prec)
+    # Calculates erf(x) using bit-burst algorithm.
+    def self.erf_bit_burst(x, prec)
       # Result is multiplied by exp(-x**2) at the end, so digits of x beyond prec - 2*x/log(10) do not affect the result.
       x = x.mult(1, [prec - (2 * x.ceil / Math.log(10)).floor, 10].max)
+      erf_erfc_bit_burst(x, prec, start_digits: 8, mode: :erf)
+    end
 
-      sqrtpi = BigMath::PI(prec).sqrt(prec)
-      digits = 8
-      calculated_x = x.truncate(digits)
-      f = erf_exp2_binary_splitting(calculated_x, BigDecimal(0), BigDecimal(0), prec)
-      f = f.mult(erf_exp2_scale(calculated_x, prec, sqrtpi), prec)
-      x -= calculated_x
+    def self.erf_erfc_bit_burst(x, prec, start_digits:, mode:)
 
-      exp_scale = BigMath.exp(-calculated_x**2, prec)
-      diff = BigDecimal(0)
+      digits = start_digits
+      partial = x.truncate(digits)
+      case mode
+      when :erf
+        f = erf_exp2_binary_splitting(partial, prec)
+      when :erfc
+        f = erfc_exp2_asymptotic_binary_splitting(partial, prec)
+        return unless f
+      end
+
+      exp_scale = BigMath.exp(-partial**2, prec)
+      f = f.mult(exp_scale, prec)
+      calculated_x = partial
+      x -= partial
+
       until x.zero?
         digits *= 2
         partial = x.truncate(digits)
         next if partial.zero?
-        d = erf_binary_splitting_diff(partial, calculated_x, prec)
-        diff = diff.add(d.mult(exp_scale, prec), prec)
-        exp_scale = exp_scale.mult(BigMath.exp(-calculated_x * partial * 2 - partial**2, prec), prec) unless x.zero?
+        diff_prec = f.zero? ? prec : [prec - f.exponent + exp_scale.exponent + partial.exponent, 1].max
+        d = erf_binary_splitting_diff(partial, calculated_x, diff_prec)
+        if mode == :erf
+          f = f.add(d.mult(exp_scale, prec), prec)
+        else
+          f = f.sub(d.mult(exp_scale, prec), prec)
+        end
+        exp_scale = exp_scale.mult(BigMath.exp(-calculated_x * partial * 2 - partial**2, prec), prec)
         calculated_x += partial
         x -= partial
       end
-      diff = diff.mult(BigDecimal(2).div(sqrtpi, prec), prec)
-      f.add(diff, prec)
+      f.mult(BigDecimal(2).div(BigMath::PI(prec).sqrt(prec), prec), prec)
     end
 
     # Matrix/Vector weighted sum
@@ -235,26 +197,26 @@ module BigMath
       m1.zip(m2).map {|v1, v2| (v1 * w1).add(v2 * w2, prec) }
     end
 
-    # Calculates Taylor expansion of erf(x+a)*exp((x+a)**2)*sqrt(pi)/2 with binary splitting method.
-    def self.erf_exp2_binary_splitting(x, a, f_a, prec) # :nodoc:
-      # Let f(x+a) = erf(x+a)*exp((x+a)**2)*sqrt(pi)/2
+    # Calculates Taylor expansion of erf(x)*exp(x**2)*sqrt(pi)/2 with binary splitting method.
+    def self.erf_exp2_binary_splitting(x, prec) # :nodoc:\
+      # Let f(x) = erf(x)*exp(x**2)*sqrt(pi)/2
       #            = c0 + c1*x + c2*x**2 + c3*x**3 + c4*x**4 + ...
-      # f'(x+a) = 1+2*(x+a)*f(x+a)
-      # f'(x+a) = c1 + 2*c2*x + 3*c3*x**2 + 4*c4*x**3 + 5*c5*x**4 + ...
-      #         = 1+2*(x+a)*(c0 + c1*x + c2*x**2 + c3*x**3 + c4*x**4 + ...)
+      # f'(x) = 1 + 2 * x * f(x)
+      # f'(x) = c1 + 2*c2*x + 3*c3*x**2 + 4*c4*x**3 + 5*c5*x**4 + ...
+      #         = 1+2*x*(c0 + c1*x + c2*x**2 + c3*x**3 + c4*x**4 + ...)
       # therefore,
-      # c0 = f(a)
-      # c1 = 2 * a * c0 + 1
-      # c2 = (2 * c0 + 2 * a * c1) / 2
-      # c3 = (2 * c1 + 2 * a * c2) / 3
-      # c4 = (2 * c2 + 2 * a * c3) / 4
+      # c0 = 0
+      # c1 = 1
+      # c2 = 2 * (c0 + c1) / 2
+      # c3 = 2 * (c1 + c2) / 3
+      # c4 = 2 * (c2 + c3) / 4
       #
-      # All coefficients are positive when a >= 0
+      # All coefficients are positive
 
       # Find the smallest n where the n-th Taylor term |c_n * x^n| falls below the precision
       # threshold, using a Stirling-based upper bound on |c_n|.
       log10f = Math.log(10)
-      cexponent = Math.log10([2 * a, Math.sqrt(2)].max.to_f) + BigDecimal::Internal.float_log(x.abs) / log10f
+      cexponent = Math.log10([0, Math.sqrt(2)].max.to_f) + BigDecimal::Internal.float_log(x.abs) / log10f
 
       steps = BigDecimal.save_exception_mode do
         # x.to_f may underflow when x is very small (e.g. 1e-400)
@@ -263,50 +225,9 @@ module BigMath
           x.to_f ** 2 < n && n * cexponent + Math.lgamma(n / 2)[0] / log10f + n * Math.log10(2) - Math.lgamma(n - 1)[0] / log10f < -prec + x.to_f**2 / log10f
         end
       end
-      if a == 0
-        # Simple calculation for special case
-        denominators = (steps / 2).times.map {|i| 2 * i + 3 }
-        return x.mult(1 + BigDecimal::Internal.taylor_sum_binary_splitting(2 * x * x, denominators, prec), prec)
-      end
 
-      # First, calculate a matrix that represents the sum of the Taylor series:
-      # SumMatrix = (((((...+I)x*M4+I)*x*M3+I)*M2*x+I)*M1*x+I)
-      # Where Mi is a 2x2 matrix that generates the next coefficients of Taylor series:
-      # Vector(c4, c5) = M4*M3*M2*M1*Vector(c0, c1)
-      # And then calculates:
-      # SumMatrix * Vector(c0, c1) = Vector(c0+c1*x+c2*x**2+..., _)
-      # In this binary splitting method, adjacent two operations are combined into one repeatedly.
-      # ((...) * x * A + B) / C is the form of each operation. A and B are 2x2 matrices, C is a scalar.
-      zero = BigDecimal(0)
-      two = BigDecimal(2)
-      two_a = two * a
-      operations = steps.times.map do |i|
-        n = BigDecimal(2 + i)
-        [[zero, n, two, two_a], [n, zero, zero, n], n]
-      end
-
-      while operations.size > 1
-        xpow = xpow ? xpow.mult(xpow, prec) : x.mult(1, prec)
-        operations = operations.each_slice(2).map do |op1, op2|
-          # Combine two operations into one:
-          # (((Remaining * x * A2 + B2) / C2) * x * A1 + B1) / C1
-          # ((Remaining * (x*x) * (A2*A1) + (x*B2*A1+B1*C2)) / (C1*C2)
-          # Therefore, combined operation can be represented as:
-          # Anext = A2 * A1
-          # Bnext = x * B2 * A1 + B1 * C2
-          # Cnext = C1 * C2
-          # xnext = x * x
-          a1, b1, c1 = op1
-          a2, b2, c2 = op2 || [[zero] * 4, [zero] * 4, BigDecimal(1)]
-          [
-            matrix_mult(a2, a1, 2, prec),
-            array_weighted_sum(matrix_mult(b2, a1, 2, prec), xpow, b1, c2, prec),
-            c1.mult(c2, prec),
-          ]
-        end
-      end
-      _, sum_matrix, denominator = operations.first
-      (sum_matrix[1] + f_a * (2 * a * sum_matrix[1] + sum_matrix[0])).div(denominator, prec)
+      denominators = (steps / 2).times.map {|i| 2 * i + 3 }
+      x.mult(1 + BigDecimal::Internal.taylor_sum_binary_splitting(2 * x * x, denominators, prec), prec)
     end
 
     # Calculates asymptotic expansion of erfc(x)*exp(x**2)*sqrt(pi)/2 with binary splitting method
