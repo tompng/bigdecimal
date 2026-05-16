@@ -78,12 +78,16 @@ module BigMath
       end
     end
 
-    def self.erf_binary_splitting_diff(x, a, prec)
-      # Calculates erf(x + a) - erf(a) as:
-      # erf(x + a) - erf(a) = (2/sqrt(pi)) * exp(-a**2) * x * sum { c(i) * x**i }
+    # Returns (erf(x + a) - erf(a)) * exp(a**2) * sqrt(pi) / 2 calculated with binary splitting method.
+    def self.erf_binary_splitting_diff(x, a, prec) # :nodoc:
+      # Let f(x) = (erf(x + a) - erf(a)) * exp(a**2) * sqrt(pi) / 2
+      # f(x) satisfies the following differential equation:
+      #   2*(x+a)*f'(x) + f''(x)
+      # We can derive the following recurrence for the Taylor coefficients of f:
+      # f(x) = x * (c0 + c1*x + c2*x**2 + c3*x**3 + ...)
       # c(0) = 1
       # c(1) = -a
-      # c(i) = -2 * (a * c(i - 1) / (i + 1) + c(i - 2) * (i - 1) / i / (i + 1))
+      # c(i) = -2 * (a * c(i - 1) + c(i - 2) * (i - 1) / i) / (i + 1)
 
       # Estimate required number of terms by calculating c(i) with low precision
       coefs = [BigDecimal(1), BigDecimal(-a)]
@@ -94,7 +98,7 @@ module BigMath
       steps = (2..).find do |n|
         prevprev, prev = coefs
         xn = xn.mult(x_low, low_prec)
-        coefs = prev, (a * prev / (n + 1) + prevprev * (n - 1) / n / (n + 1)).mult(-2, low_prec)
+        coefs = prev, (a * prev + prevprev * (n - 1) / n).mult(-2, low_prec).div(n + 1, low_prec)
         coefs[0].mult(xn, low_prec).abs < threshold && coefs[1].mult(xn * x_low, low_prec).abs < threshold
       end
 
@@ -103,13 +107,12 @@ module BigMath
       # M(i) = | 0,                1          |
       #        | -2*(i-1)/i/(i+1), -2*a/(i+1) |
       #
-
-      # First, calculate a matrix that represents the sum of the Taylor series:
-      # SumMatrix = ((((...+I)x*M4+I)*x*M3+I)*M2*x+I)
-      # Where Mi is a 2x2 matrix that generates the next coefficients of Taylor series:
-      # Vector(c4, c5) = M5*M4*M3*M2*Vector(c0, c1)
-      # And then calculates:
-      # SumMatrix * Vector(c0, c1) = Vector(c0+c1*x+c2*x**2+c3*x**3+..., _)
+      # Then, we can calculate (c(steps-1), c(steps)) as M(steps)*M(steps-1)*...*M(2)*Vector(c0, c1).
+      #
+      # Calculate a matrix that represents the sum of the Taylor series:
+      #   SumMatrix = ((((...+I)x*M4+I)*x*M3+I)*M2*x+I)
+      # Actual sum can be calculated as:
+      #   SumMatrix * Vector(c0, c1) = Vector(c0+c1*x+c2*x**2+c3*x**3+..., _)
       # In this binary splitting method, adjacent two operations are combined into one repeatedly.
       # ((...) * x * A + B) / C is the form of each operation. A and B are 2x2 matrices, C is a scalar.
 
@@ -147,18 +150,20 @@ module BigMath
 
     # Calculates erfc(x) using bit-burst algorithm.
     # Returns nil if the asymptotic expansion does not reach the requested precision.
-    def self.erfc_bit_burst(x, prec)
+    def self.erfc_bit_burst(x, prec) # :nodoc:
       x = x.mult(1, prec + Math.log10(2 * x.to_f**2).ceil)
       erf_erfc_bit_burst(x, prec, start_digits: 40, mode: :erfc)
     end
 
     # Calculates erf(x) using bit-burst algorithm.
-    def self.erf_bit_burst(x, prec)
+    def self.erf_bit_burst(x, prec) # :nodoc:
       x = x.mult(1, [(prec - x.floor**2 / Math.log(10) + Math.log10(x.ceil)).ceil, 10].max)
       erf_erfc_bit_burst(x, prec, start_digits: 8, mode: :erf)
     end
 
-    def self.erf_erfc_bit_burst(x, prec, start_digits:, mode:)
+    # Calculates erf or erfc using bit-burst algorithm.
+    # Returns nil if erfc mode cannot reach the requested precision.
+    def self.erf_erfc_bit_burst(x, prec, start_digits:, mode:) # :nodoc:
       digits = [-x.exponent * 2, start_digits].max
       partial = x.truncate(digits)
       case mode
@@ -179,14 +184,16 @@ module BigMath
         digits *= 2
         partial = x.truncate(digits)
         next if partial.zero?
+
         diff_prec = [prec - f.exponent + exp_scale.exponent + partial.exponent, 1].max
-        d = erf_binary_splitting_diff(partial, calculated_x, diff_prec)
+        diff = erf_binary_splitting_diff(partial, calculated_x, diff_prec)
         case mode
         when :erf
-          f = f.add(d.mult(exp_scale, prec), prec)
+          f = f.add(diff.mult(exp_scale, prec), prec)
         when :erfc
-          f = f.sub(d.mult(exp_scale, prec), prec)
+          f = f.sub(diff.mult(exp_scale, prec), prec)
         end
+
         calculated_x += partial
         x -= partial
         exp_scale = exp_scale.mult(BigMath.exp(partial * (partial - 2 * calculated_x), diff_prec), diff_prec) unless x.zero?
@@ -203,6 +210,9 @@ module BigMath
     def self.erf_exp2_binary_splitting(x, prec) # :nodoc:\
       # Let f(x) = erf(x)*exp(x**2)*sqrt(pi)/2
       #            = c0 + c1*x + c2*x**2 + c3*x**3 + c4*x**4 + ...
+      # f(x) is designed to make all coefficients positive so that we don't need to consider cancellation error.
+      #
+      # f(x) satisfies the following differential equation:
       # f'(x) = 1 + 2 * x * f(x)
       # f'(x) = c1 + 2*c2*x + 3*c3*x**2 + 4*c4*x**3 + 5*c5*x**4 + ...
       #         = 1+2*x*(c0 + c1*x + c2*x**2 + c3*x**3 + c4*x**4 + ...)
@@ -212,8 +222,6 @@ module BigMath
       # c2 = 2 * (c0 + c1) / 2
       # c3 = 2 * (c1 + c2) / 3
       # c4 = 2 * (c2 + c3) / 4
-      #
-      # All coefficients are positive
 
       # Find the smallest n where the n-th Taylor term |c_n * x^n| falls below the precision
       # threshold, using a Stirling-based upper bound on |c_n|.
@@ -278,5 +286,5 @@ module BigMath
     end
   end
 
-  # private_constant :Erf
+  private_constant :Erf
 end
