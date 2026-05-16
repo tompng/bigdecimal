@@ -36,7 +36,6 @@ module BigMath
       return BigDecimal(0) if x == 0
       return -erf(-x, prec) if x < 0
       return BigDecimal(1) if x > 5000000000 # erf(5000000000) > 1 - 1e-10000000000000000000
-
       if x > 8
         xf = x.to_f
         log10_erfc = -xf ** 2 / Math.log(10) - Math.log10(xf * Math::PI ** 0.5)
@@ -146,20 +145,21 @@ module BigMath
       x.mult(sum, prec)
     end
 
+    # Calculates erfc(x) using bit-burst algorithm.
+    # Returns nil if the asymptotic expansion does not reach the requested precision.
     def self.erfc_bit_burst(x, prec)
+      x = x.mult(1, prec + Math.log10(2 * x.to_f**2).ceil)
       erf_erfc_bit_burst(x, prec, start_digits: 40, mode: :erfc)
     end
 
     # Calculates erf(x) using bit-burst algorithm.
     def self.erf_bit_burst(x, prec)
-      # Result is multiplied by exp(-x**2) at the end, so digits of x beyond prec - 2*x/log(10) do not affect the result.
-      x = x.mult(1, [prec - (2 * x.ceil / Math.log(10)).floor, 10].max)
+      x = x.mult(1, [(prec - x.floor**2 / Math.log(10) + Math.log10(x.ceil)).ceil, 10].max)
       erf_erfc_bit_burst(x, prec, start_digits: 8, mode: :erf)
     end
 
     def self.erf_erfc_bit_burst(x, prec, start_digits:, mode:)
-
-      digits = start_digits
+      digits = [-x.exponent * 2, start_digits].max
       partial = x.truncate(digits)
       case mode
       when :erf
@@ -169,8 +169,9 @@ module BigMath
         return unless f
       end
 
-      exp_scale = BigMath.exp(-partial**2, prec)
+      exp_scale = BigMath.exp(-partial * partial, prec)
       f = f.mult(exp_scale, prec)
+
       calculated_x = partial
       x -= partial
 
@@ -178,16 +179,17 @@ module BigMath
         digits *= 2
         partial = x.truncate(digits)
         next if partial.zero?
-        diff_prec = f.zero? ? prec : [prec - f.exponent + exp_scale.exponent + partial.exponent, 1].max
+        diff_prec = [prec - f.exponent + exp_scale.exponent + partial.exponent, 1].max
         d = erf_binary_splitting_diff(partial, calculated_x, diff_prec)
-        if mode == :erf
+        case mode
+        when :erf
           f = f.add(d.mult(exp_scale, prec), prec)
-        else
+        when :erfc
           f = f.sub(d.mult(exp_scale, prec), prec)
         end
-        exp_scale = exp_scale.mult(BigMath.exp(-calculated_x * partial * 2 - partial**2, prec), prec)
         calculated_x += partial
         x -= partial
+        exp_scale = exp_scale.mult(BigMath.exp(partial * (partial - 2 * calculated_x), diff_prec), diff_prec) unless x.zero?
       end
       f.mult(BigDecimal(2).div(BigMath::PI(prec).sqrt(prec), prec), prec)
     end
@@ -216,14 +218,11 @@ module BigMath
       # Find the smallest n where the n-th Taylor term |c_n * x^n| falls below the precision
       # threshold, using a Stirling-based upper bound on |c_n|.
       log10f = Math.log(10)
-      cexponent = Math.log10([0, Math.sqrt(2)].max.to_f) + BigDecimal::Internal.float_log(x.abs) / log10f
+      cexponent = Math.log10(Math.sqrt(2)) + BigDecimal::Internal.float_log(x.abs) / log10f
 
-      steps = BigDecimal.save_exception_mode do
-        # x.to_f may underflow when x is very small (e.g. 1e-400)
-        BigDecimal.mode(BigDecimal::EXCEPTION_UNDERFLOW, false)
-        (2..).bsearch do |n|
-          x.to_f ** 2 < n && n * cexponent + Math.lgamma(n / 2)[0] / log10f + n * Math.log10(2) - Math.lgamma(n - 1)[0] / log10f < -prec + x.to_f**2 / log10f
-        end
+      x_to_f = x < 1e-300 ? 1e-300 : x.to_f # x.to_f may underflow when x is very small (e.g. 1e-400)
+      steps = (2..).bsearch do |n|
+        x_to_f ** 2 < n && n * cexponent + Math.lgamma(n / 2)[0] / log10f + n * Math.log10(2) - Math.lgamma(n - 1)[0] / log10f < -prec + x_to_f**2 / log10f
       end
 
       denominators = (steps / 2).times.map {|i| 2 * i + 3 }
