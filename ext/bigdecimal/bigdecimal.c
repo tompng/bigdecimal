@@ -2846,6 +2846,8 @@ rb_cstr_convert_to_BigDecimal(const char *c_str, int raise_exception)
 static inline VALUE
 rb_str_convert_to_BigDecimal(VALUE val, int raise_exception)
 {
+    StringValue(val);
+    rb_must_asciicompat(val);
     if (!raise_exception && memchr(RSTRING_PTR(val), '\0', RSTRING_LEN(val))) return Qnil;
     const char *c_str = StringValueCStr(val);
     VALUE bd = rb_cstr_convert_to_BigDecimal(c_str, raise_exception);
@@ -3012,6 +3014,12 @@ f_BigDecimal(int argc, VALUE *argv, VALUE self)
 static VALUE
 BigDecimal_s_interpret_loosely(VALUE klass, VALUE str)
 {
+    StringValue(str);
+    rb_must_asciicompat(str);
+    /* Like String#to_f, ignore everything after an embedded NUL */
+    const char *p = RSTRING_PTR(str);
+    const char *nul = memchr(p, '\0', RSTRING_LEN(str));
+    if (nul) str = rb_str_subseq(str, 0, nul - p);
     char const *c_str = StringValueCStr(str);
     NULLABLE_BDVALUE v = CreateFromString(c_str, klass, false, true);
     RB_GC_GUARD(str);
