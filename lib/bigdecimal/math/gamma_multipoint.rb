@@ -271,10 +271,13 @@ module BigMath
         sum_series = BigDecimal(1)
         prod = x - a0
         c_k = BigDecimal(1)
+        # sum_series, c_k and prod are updated once per batch, so their rounding
+        # errors accumulate in proportion to the number of batches.
+        accumulate_prec = prec + Math.log10(g).ceil + 1
         g.times do |k|
-          dk = BigDecimal(dvals[k]).mult(1, prec)
-          nk = BigDecimal(nvals[k]).mult(1, prec)
-          sum_series = sum_series.add(c_k.mult(nk, prec).div(dk, prec).mult(pw_nd, prec), prec)
+          dk = BigDecimal(dvals[k]).mult(1, accumulate_prec)
+          nk = BigDecimal(nvals[k]).mult(1, accumulate_prec)
+          sum_series = sum_series.add(c_k.mult(nk, accumulate_prec).div(dk, accumulate_prec).mult(pw_nd, accumulate_prec), accumulate_prec)
 
           # Same-value invariant: the batch factor of prod is derived from the
           # same computed D_k used in the sum denominator, so near-node errors
@@ -282,10 +285,10 @@ module BigMath
           bik = 1
           t0 = k * s_cap
           (1..s_cap).each {|j| bik *= (t0 + j) * (a0 + t0 + j) }
-          prod = prod.mult(dk, prec).div(bik, prec)
+          prod = prod.mult(dk, accumulate_prec).div(bik, accumulate_prec)
 
           if k < g - 1
-            c_k = c_k.mult(BigDecimal(mvals[k]).mult(1, prec), prec).div(dk, prec).mult(pw_md, prec)
+            c_k = c_k.mult(BigDecimal(mvals[k]).mult(1, accumulate_prec), accumulate_prec).div(dk, accumulate_prec).mult(pw_md, accumulate_prec)
           end
         end
         prod = prod.mult(BigDecimal(2).power(g * ed, prec), prec) unless ed.zero?
@@ -323,6 +326,9 @@ module BigMath
           mbatch = 1 << [(0.5 * Math.log2(shift)).round, 1].max
           full = shift / mbatch
         end
+        # prod takes full batch factors and up to mbatch - 1 remainder factors,
+        # each rounded once.
+        accumulate_prec = prec + Math.log10(full + mbatch).ceil + 1
         if full > 0
           s2 = 1 << keep
           xi = (x._decimal_shift(fd).to_i << keep) / p10
@@ -333,12 +339,12 @@ module BigMath
           end
           vals, e = tab
           full.times do |k|
-            prod = prod.mult(BigDecimal(vals[k]).mult(1, prec), prec)
+            prod = prod.mult(BigDecimal(vals[k]).mult(1, accumulate_prec), accumulate_prec)
           end
-          prod = prod.mult(BigDecimal(2).power(full * e, prec), prec) unless e.zero?
+          prod = prod.mult(BigDecimal(2).power(full * e, prec), accumulate_prec) unless e.zero?
         end
-        (full * mbatch...shift).each {|i| prod = prod.mult(x - i, prec) }
-        prod
+        (full * mbatch...shift).each {|i| prod = prod.mult(x - i, accumulate_prec) }
+        prod.mult(1, prec)
       end
     end
   end
